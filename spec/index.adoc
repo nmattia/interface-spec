@@ -2614,20 +2614,6 @@ that represents Candid encoding; this is implicitly taking the method types, as 
 The following predicate describes when an envelope `E` correctly signs the enclosed request with a key belonging to a user `U`, at time `T`:
 It returns which canister ids this envelope may be used at (as a set of principals).
 ....
-verify_envelope({ content = C }, U, T)
-  = { p : p is CanisterID } if U = anonymous_id
-verify_envelope({ content = C, sender_pubkey = PK, sender_sig = Sig, sender_delegation = DS}, U, T)
-  = TS if U = mk_self_authenticating_id E.sender_pubkey
-  ∧ (PK', TS) = verify_delegations(DS, PK, T, { p : p is CanisterId }, U)
-  ∧ verify_signature PK' Sig ("\x0Aic-request" · hash_of_map(C))
-
-verify_delegations([], PK, T, TS, U) = (PK, TS)
-verify_delegations([D] · DS, PK, T, TS, U)
-  = verify_delegations(DS, D.pubkey, T, TS ∩ delegation_targets(D), U)
-  if verify_signature PK D.signature ("\x1Aic-request-auth-delegation" · hash_of_map(D.delegation))
-   ∧ D.delegation.expiration ≥ T
-   ∧ U ∈ delegated_senders(D)
-
 delegation_targets(D)
   = if D.targets = Unrestricted
     then { p : p is CanisterId }
@@ -2637,6 +2623,20 @@ delegated_senders(D)
   = if D.senders = Unrestricted
     then { p : p is Principal }
     else D.senders
+
+verify_delegations([], PK, T, TS, U) = (PK, TS)
+verify_delegations([D] · DS, PK, T, TS, U)
+  = verify_delegations(DS, D.delegation.pubkey, T, TS ∩ delegation_targets(D.delegation), U)
+  if verify_signature PK D.signature ("\x1Aic-request-auth-delegation" · hash_of_map(D.delegation))
+   ∧ D.delegation.expiration ≥ T
+   ∧ U ∈ delegated_senders(D.delegation)
+
+verify_envelope({ content = C }, U, T)
+  = { p : p is CanisterID } if U = anonymous_id
+verify_envelope({ content = C, sender_pubkey = PK, sender_sig = Sig, sender_delegation = DS}, U, T)
+  = TS if U = mk_self_authenticating_id E.sender_pubkey
+  ∧ (PK', TS) = verify_delegations(DS, PK, T, { p : p is CanisterId }, U)
+  ∧ verify_signature PK' Sig ("\x0Aic-request" · hash_of_map(C))
 ....
 
 ==== Effective canister ids

@@ -361,7 +361,7 @@ record ('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope =
   content :: "('b, 'p, 'uid, 'canid, 's) request + ('b, 'uid, 'canid, 's) APIReadRequest"
   sender_pubkey :: "'pk option"
   sender_sig :: "'sig option"
-  sender_delegation :: "('p, 'canid, 'pk, 'sig) delegation list"
+  sender_delegation :: "('p, 'canid, 'pk, 'sig) signed_delegation list"
 
 datatype ('b, 's) request_status = Received | Processing | Rejected reject_code 's | Replied 'b | Done
 
@@ -482,7 +482,7 @@ fun candid_lookup :: "('s, 'b, 'p) candid \<Rightarrow> 's \<Rightarrow> ('s, 'b
 
 (* State transitions *)
 
-context fixes
+locale machine = fixes
   CANISTER_ERROR :: reject_code
   and CANISTER_REJECT :: reject_code
   and SYS_FATAL :: reject_code
@@ -490,15 +490,17 @@ context fixes
   and MAX_CYCLES_PER_MESSAGE :: nat
   and MAX_CYCLES_PER_RESPONSE :: nat
   and MAX_CANISTER_BALANCE :: nat
+  and ic_request_auth_delegation :: 'b
+  and ic_request :: 'b
   and ic_idle_cycles_burned_rate :: "('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> 'canid \<Rightarrow> nat"
+  and blob_empty :: 'b
   and blob_length :: "'b \<Rightarrow> nat"
+  and blob_concat :: "'b \<Rightarrow> 'b \<Rightarrow> 'b"
   and sha_256 :: "'b \<Rightarrow> 'b"
-  and ic_principal :: 'canid
   and blob_of_candid :: "('s, 'b, 'p) candid \<Rightarrow> 'b"
   and parse_candid :: "'b \<Rightarrow> ('s, 'b, 'p) candid option"
   and parse_principal :: "'b \<Rightarrow> 'p option"
   and blob_of_principal :: "'p \<Rightarrow> 'b"
-  and empty_blob :: 'b
   and is_system_assigned :: "'p \<Rightarrow> bool"
   and encode_string :: "string \<Rightarrow> 's"
   and principal_of_uid :: "'uid \<Rightarrow> 'p"
@@ -507,8 +509,16 @@ context fixes
   and parse_wasm_mod :: "'b \<Rightarrow> ('p, 'canid, 'b, 'w, 'sm, 'c, 's) canister_module option"
   and parse_public_custom_sections :: "'b \<Rightarrow> ('s, 'b) list_map option"
   and parse_private_custom_sections :: "'b \<Rightarrow> ('s, 'b) list_map option"
-  and verify_envelope :: "('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope \<Rightarrow> 'p \<Rightarrow> nat \<Rightarrow> 'p set" (* TODO *)
   and principal_list_of_set :: "'p set \<Rightarrow> 'p list"
+  and mk_self_authenticating_id :: "'pk \<Rightarrow> 'p"
+  and mk_derived_id :: "'p \<Rightarrow> 'b \<Rightarrow> 'p"
+  and anonymous_id :: "'p"
+  and ic_principal :: "'canid"
+  and verify_signature :: "'pk \<Rightarrow> 'sig \<Rightarrow> 'b \<Rightarrow> bool"
+  and hash_of_delegation :: "('p, 'canid, 'pk, 'sig) delegation \<Rightarrow> 'b"
+  and hash_of_user_request :: "('b, 'p, 'uid, 'canid, 's) request + ('b, 'uid, 'canid, 's) APIReadRequest \<Rightarrow> 'b"
+assumes hash_of_delegation_length: "blob_length (hash_of_delegation del) = 32"
+  and hash_of_user_request_length: "blob_length (hash_of_user_request con) = 32"
 begin
 
 (* Type conversion functions *)
@@ -609,6 +619,36 @@ definition is_effective_canister_id :: "('b, 'p, 'uid, 'canid, 's) request \<Rig
       (case candid_parse_cid (request.arg r) of Some cid \<Rightarrow> principal_of_canid cid = p | _ \<Rightarrow> False)
     else principal_of_canid (request.canister_id r) = p)"
 
+(* Envelope Authentication *)
+
+definition delegation_targets :: "('p, 'canid, 'pk, 'sig) delegation \<Rightarrow> 'canid set" where
+  "delegation_targets d = (case targets d of None \<Rightarrow> UNIV | Some ts \<Rightarrow> set ts)"
+
+definition delegated_senders :: "('p, 'canid, 'pk, 'sig) delegation \<Rightarrow> 'p set" where
+  "delegated_senders d = (case senders d of None \<Rightarrow> UNIV | Some ts \<Rightarrow> set ts)"
+
+fun verify_delegations :: "('p, 'canid, 'pk, 'sig) signed_delegation list \<Rightarrow> 'pk \<Rightarrow> nat \<Rightarrow> 'canid set \<Rightarrow> 'uid \<Rightarrow> ('pk \<times> ('canid set)) option" where
+  "verify_delegations [] pk t ts u = Some (pk, ts)"
+| "verify_delegations (d # ds) pk t ts u = (
+    let del = delegation d in
+    (if verify_signature pk (signature d) (blob_concat ic_request_auth_delegation (hash_of_delegation del)) \<and>
+      expiration del \<ge> t \<and> principal_of_uid u \<in> delegated_senders del
+    then verify_delegations ds (pubkey del) t (ts \<inter> delegation_targets del) u
+    else None)
+  )"
+
+definition verify_envelope :: "('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope \<Rightarrow> 'uid \<Rightarrow> nat \<Rightarrow> 'p set" where
+  "verify_envelope e u t = (if principal_of_uid u = anonymous_id then principal_of_canid ` UNIV else
+    (case (sender_pubkey e, sender_sig e) of (Some pk, Some sig) \<Rightarrow>
+      if principal_of_uid u = mk_self_authenticating_id pk then
+        (case verify_delegations (sender_delegation e) pk t UNIV u of Some (pk', ts) \<Rightarrow>
+          if verify_signature pk' sig (blob_concat ic_request (hash_of_user_request (content e))) then
+            principal_of_canid ` ts
+          else {}
+        | _ \<Rightarrow> {})
+      else {}
+    | _ \<Rightarrow> {}))"
+
 
 
 (* System transition: API Request submission [DONE] *)
@@ -618,7 +658,7 @@ definition ic_freezing_limit :: "('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, '
 
 definition request_submission_pre :: "('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope \<Rightarrow> 'p \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
   "request_submission_pre E ECID S = (case content E of Inl req \<Rightarrow>
-    principal_of_canid (request.canister_id req) \<in> verify_envelope E (principal_of_uid (request.sender req)) (system_time S) \<and>
+    principal_of_canid (request.canister_id req) \<in> verify_envelope E (request.sender req) (system_time S) \<and>
     req \<notin> list_map_dom (requests S) \<and>
     system_time S \<le> request.ingress_expiry req \<and>
     is_effective_canister_id req ECID \<and>
@@ -1348,7 +1388,7 @@ definition ic_canister_creation_post :: "nat \<Rightarrow> 'canid \<Rightarrow> 
       controllers := list_map_set (controllers S) cid ctrls,
       freezing_threshold := list_map_set (freezing_threshold S) cid 2592000,
       balances := list_map_set (balances S) cid trans_cycles,
-      certified_data := list_map_set (certified_data S) cid empty_blob,
+      certified_data := list_map_set (certified_data S) cid blob_empty,
       messages := take n (messages S) @ drop (Suc n) (messages S) @ [Response_message orig (Reply (blob_of_candid
         (Candid_record (list_map_init [(encode_string ''canister_id'', Candid_blob (blob_of_canid cid))])))) 0],
       canister_status := list_map_set (canister_status S) cid Running\<rparr>)"
@@ -1709,7 +1749,7 @@ definition ic_code_uninstallation_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 
         Some (Response_message (call_ctxt_origin ctxt) (response.Reject CANISTER_REJECT (encode_string ''Canister has been uninstalled'')) (call_ctxt_available_cycles ctxt))
       else None);
     call_ctxt_to_ctxt = (\<lambda>ctxt. if call_ctxt_canister ctxt = cid then call_ctxt_delete ctxt else ctxt) in
-    S\<lparr>canisters := list_map_set (canisters S) cid None, certified_data := list_map_set (certified_data S) cid empty_blob,
+    S\<lparr>canisters := list_map_set (canisters S) cid None, certified_data := list_map_set (certified_data S) cid blob_empty,
       messages := take n (messages S) @ drop (Suc n) (messages S) @ [Response_message orig (Reply (blob_of_candid Candid_empty)) trans_cycles] @
         List.map_filter call_ctxt_to_msg (list_map_vals (call_contexts S)),
       call_contexts := list_map_map call_ctxt_to_ctxt (call_contexts S)\<rparr>))"
@@ -2256,7 +2296,7 @@ definition ic_provisional_canister_creation_post :: "nat \<Rightarrow> 'canid \<
       controllers := list_map_set (controllers S) cid {cer},
       freezing_threshold := list_map_set (freezing_threshold S) cid 2592000,
       balances := list_map_set (balances S) cid cyc,
-      certified_data := list_map_set (certified_data S) cid empty_blob,
+      certified_data := list_map_set (certified_data S) cid blob_empty,
       messages := take n (messages S) @ drop (Suc n) (messages S) @ [Response_message orig (Reply (blob_of_candid
         (Candid_record (list_map_init [(encode_string ''canister_id'', Candid_blob (blob_of_canid cid))])))) trans_cycles],
       canister_status := list_map_set (canister_status S) cid Running\<rparr>)"
@@ -2562,7 +2602,7 @@ definition canister_out_of_cycles_post :: "'canid \<Rightarrow> ('p, 'uid, 'cani
         Some (Response_message (call_ctxt_origin ctxt) (response.Reject CANISTER_REJECT (encode_string ''Canister has been uninstalled'')) (call_ctxt_available_cycles ctxt))
       else None);
     call_ctxt_to_ctxt = (\<lambda>ctxt. if call_ctxt_canister ctxt = cid then call_ctxt_delete ctxt else ctxt) in
-    S\<lparr>canisters := list_map_set (canisters S) cid None, certified_data := list_map_set (certified_data S) cid empty_blob,
+    S\<lparr>canisters := list_map_set (canisters S) cid None, certified_data := list_map_set (certified_data S) cid blob_empty,
       messages := messages S @ List.map_filter call_ctxt_to_msg (list_map_vals (call_contexts S)),
       call_contexts := list_map_map call_ctxt_to_ctxt (call_contexts S)\<rparr>)"
 
@@ -2804,6 +2844,7 @@ lemma ic_inv:
 
 end
 
+(*TODO: instantiate locale machine and export names
 export_code request_submission_pre request_submission_post
   request_rejection_pre request_rejection_post
   initiate_canister_call_pre initiate_canister_call_post
@@ -2840,5 +2881,6 @@ export_code request_submission_pre request_submission_post
   cycle_consumption_pre cycle_consumption_post
   system_time_progress_pre system_time_progress_post
 in Haskell module_name IC file_prefix code
+*)
 
 end
