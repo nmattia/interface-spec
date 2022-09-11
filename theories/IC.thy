@@ -480,6 +480,47 @@ fun candid_lookup :: "('s, 'b, 'p) candid \<Rightarrow> 's \<Rightarrow> ('s, 'b
   "candid_lookup (Candid_record m) s = list_map_get m s"
 | "candid_lookup _ _ = None"
 
+(* Certification *)
+
+datatype ('l, 'b, 'h) htree =
+  Empty
+  | Fork "('l, 'b, 'h) htree" "('l, 'b, 'h) htree"
+  | Labeled 'l "('l, 'b, 'h) htree"
+  | Leaf 'b
+  | Pruned 'h
+
+datatype 'a lookup_result =
+  Absent
+  | Found 'a
+  | Unknown
+  | Error
+
+fun flatten_forks :: "('l, 'b, 'h) htree \<Rightarrow> ('l, 'b, 'h) htree list" where
+  "flatten_forks Empty = []"
+| "flatten_forks (Fork t1 t2) = flatten_forks t1 @ flatten_forks t2"
+| "flatten_forks t = [t]"
+
+inductive absent_label :: "'l :: linorder \<Rightarrow> ('l, 'b, 'h) htree list \<Rightarrow> bool" where
+  "l1 < l \<Longrightarrow> l < l2 \<Longrightarrow> absent_label l (xs @ Labeled l1 _ # Labeled l2 _ # ys)"
+| "l < l2 \<Longrightarrow> absent_label l (Labeled l2 _ # ys)"
+| "l1 < l \<Longrightarrow> absent_label l (xs @ [Labeled l1 _])"
+| "absent_label l []"
+
+fun find_label :: "'l :: linorder \<Rightarrow> ('l, 'b, 'h) htree list \<Rightarrow> ('l, 'b, 'h) htree lookup_result" where
+  "find_label l ts = (if absent_label l ts then Absent else fold (\<lambda>t r. case t of Labeled l1 t1 \<Rightarrow> if l = l1 then Found t1 else r | _ \<Rightarrow> r) ts Unknown)"
+
+fun lookup_path :: "'l :: linorder list \<Rightarrow> ('l, 'b, 'h) htree \<Rightarrow> 'b lookup_result" where
+  "lookup_path [] Empty = Absent"
+| "lookup_path [] (Leaf v) = Found v"
+| "lookup_path [] (Pruned _) = Unknown"
+| "lookup_path [] (Labeled _ _) = Error"
+| "lookup_path [] (Fork _ _) = Error"
+| "lookup_path (l#ls) tree = (case find_label l (flatten_forks tree) of
+    Absent \<Rightarrow> Absent
+  | Unknown \<Rightarrow> Unknown
+  | Error \<Rightarrow> Error
+  | Found subtree \<Rightarrow> lookup_path ls subtree)"
+
 (* State transitions *)
 
 locale machine = fixes
