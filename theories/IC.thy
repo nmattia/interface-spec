@@ -348,13 +348,13 @@ record ('b, 'uid, 'canid, 's) CanisterQuery =
   arg :: 'b
 type_synonym ('b, 'uid, 'canid, 's) APIReadRequest = "('b, 'uid) StateRead + ('b, 'uid, 'canid, 's) CanisterQuery"
 
-record ('p, 'canid, 'pk, 'sig) delegation =
+record ('p, 'canid, 'pk, 'sig) sender_delegation =
   pubkey :: 'pk
   targets :: "'canid list option"
   senders :: "'p list option"
   expiration :: timestamp
 record ('p, 'canid, 'pk, 'sig) signed_delegation =
-  delegation :: "('p, 'canid, 'pk, 'sig) delegation"
+  delegation :: "('p, 'canid, 'pk, 'sig) sender_delegation"
   signature :: "'sig"
 
 record ('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope =
@@ -482,34 +482,37 @@ fun candid_lookup :: "('s, 'b, 'p) candid \<Rightarrow> 's \<Rightarrow> ('s, 'b
 
 (* Certification *)
 
-datatype ('l, 'b, 'h) htree =
-  Empty
-  | Fork "('l, 'b, 'h) htree" "('l, 'b, 'h) htree"
-  | Labeled 'l "('l, 'b, 'h) htree"
+datatype ('l, 'h, 'b) htree
+  = Empty
+  | Fork "('l, 'h, 'b) htree" "('l, 'h, 'b) htree"
+  | Labeled 'l "('l, 'h, 'b) htree"
   | Leaf 'b
   | Pruned 'h
 
-datatype 'a lookup_result =
-  Absent
+datatype ('l, 'h, 'b, 'p, 'sig) certificate = Certificate (cert_tree: "('l, 'h, 'b) htree") (cert_signature: 'sig) (cert_delegation: "('l, 'h, 'b, 'p, 'sig) delegation option")
+and ('l, 'h, 'b, 'p, 'sig) delegation = Delegation (subnet_id: 'p) (certificate: "('l, 'h, 'b, 'p, 'sig) certificate")
+
+datatype 'a lookup_result
+  = Absent
   | Found 'a
   | Unknown
   | Error
 
-fun flatten_forks :: "('l, 'b, 'h) htree \<Rightarrow> ('l, 'b, 'h) htree list" where
+fun flatten_forks :: "('l, 'h, 'b) htree \<Rightarrow> ('l, 'h, 'b) htree list" where
   "flatten_forks Empty = []"
 | "flatten_forks (Fork t1 t2) = flatten_forks t1 @ flatten_forks t2"
 | "flatten_forks t = [t]"
 
-inductive absent_label :: "'l :: linorder \<Rightarrow> ('l, 'b, 'h) htree list \<Rightarrow> bool" where
+inductive absent_label :: "'l :: linorder \<Rightarrow> ('l, 'h, 'b) htree list \<Rightarrow> bool" where
   "l1 < l \<Longrightarrow> l < l2 \<Longrightarrow> absent_label l (xs @ Labeled l1 _ # Labeled l2 _ # ys)"
 | "l < l2 \<Longrightarrow> absent_label l (Labeled l2 _ # ys)"
 | "l1 < l \<Longrightarrow> absent_label l (xs @ [Labeled l1 _])"
 | "absent_label l []"
 
-fun find_label :: "'l :: linorder \<Rightarrow> ('l, 'b, 'h) htree list \<Rightarrow> ('l, 'b, 'h) htree lookup_result" where
+fun find_label :: "'l :: linorder \<Rightarrow> ('l, 'h, 'b) htree list \<Rightarrow> ('l, 'h, 'b) htree lookup_result" where
   "find_label l ts = (if absent_label l ts then Absent else fold (\<lambda>t r. case t of Labeled l1 t1 \<Rightarrow> if l = l1 then Found t1 else r | _ \<Rightarrow> r) ts Unknown)"
 
-fun lookup_path :: "'l :: linorder list \<Rightarrow> ('l, 'b, 'h) htree \<Rightarrow> 'b lookup_result" where
+fun lookup_path :: "'l :: linorder list \<Rightarrow> ('l, 'h, 'b) htree \<Rightarrow> 'b lookup_result" where
   "lookup_path [] Empty = Absent"
 | "lookup_path [] (Leaf v) = Found v"
 | "lookup_path [] (Pruned _) = Unknown"
@@ -521,9 +524,106 @@ fun lookup_path :: "'l :: linorder list \<Rightarrow> ('l, 'b, 'h) htree \<Right
   | Error \<Rightarrow> Error
   | Found subtree \<Rightarrow> lookup_path ls subtree)"
 
+definition lookup :: "'l :: linorder list \<Rightarrow> ('l, 'h, 'b, 'p, 'sig) certificate \<Rightarrow> 'b lookup_result" where
+  "lookup p cert = lookup_path p (cert_tree cert)"
+
+fun htree_measure :: "('l, 'h, 'b) htree \<Rightarrow> nat" where
+  "htree_measure Empty = 1"
+| "htree_measure (Leaf v) = 1"
+| "htree_measure (Pruned _) = 1"
+| "htree_measure (Labeled _ t) = Suc (Suc (htree_measure t))"
+| "htree_measure (Fork t1 t2) = htree_measure t1 + htree_measure t2"
+
+fun size_list' :: "('a \<Rightarrow> nat) \<Rightarrow> 'a list \<Rightarrow> nat" where
+  "size_list' sz [] = 0"
+| "size_list' sz (x # xs) = sz x + size_list' sz xs"
+
+lemma size_list'_app[simp]: "size_list' sz (xs @ ys) = size_list' sz xs + size_list' sz ys"
+  by (induction xs) auto
+
+lemma size_list'_inD: "x \<in> set xs \<Longrightarrow> sz x \<le> size_list' sz xs"
+  by (induction xs) auto
+
+lemma size_list'_size_flatten_forks: "size_list' htree_measure (flatten_forks t) < Suc (htree_measure t)"
+  by (induction t) auto
+
+definition ssorted :: "('a :: linorder) list \<Rightarrow> bool" where
+  "ssorted xs \<longleftrightarrow> sorted xs \<and> distinct xs"
+
+function well_formed :: "('l :: linorder, 'h, 'b) htree \<Rightarrow> bool" and well_formed_forest :: "('l, 'h, 'b) htree list \<Rightarrow> bool" where
+  "well_formed t = ((case t of Leaf _ \<Rightarrow> True | _ \<Rightarrow> False) \<or> well_formed_forest (flatten_forks t))"
+| "well_formed_forest ts = (ssorted (List.map_filter (\<lambda>t. case t of Labeled l _ \<Rightarrow> Some l | _ \<Rightarrow> None) ts) \<and> (\<forall>t \<in> set ts. (case t of Labeled _ t' \<Rightarrow> well_formed t')) \<and> (\<forall>t \<in> set ts. (case t of Leaf _ \<Rightarrow> False | _ \<Rightarrow> True)))"
+  by pat_completeness auto
+termination
+  by (relation "measure (\<lambda>v. case v of Inl t \<Rightarrow> Suc (htree_measure t) | Inr ts \<Rightarrow> size_list' htree_measure ts)")
+     (auto intro: size_list'_size_flatten_forks dest: size_list'_inD[where ?sz=htree_measure])
+
+(* Certification code *)
+
+fun witness_pair :: "'l :: linorder \<Rightarrow> ('l, 'h, 'b) htree list \<Rightarrow> bool" where
+  "witness_pair l (Labeled l1 t1 # Labeled l2 t2 # ys) = ((l1 < l \<and> l < l2) \<or> witness_pair l (Labeled l2 t2 # ys))"
+| "witness_pair l (x # ys) = witness_pair l ys"
+| "witness_pair l [] = False"
+
+lemma witness_pair_iff: "witness_pair l xs \<longleftrightarrow> (\<exists>ys l1 t1 l2 t2 zs. xs = ys @ Labeled l1 t1 # Labeled l2 t2 # zs \<and> l1 < l \<and> l < l2)"
+proof (induction xs rule: induct_list012)
+  case (3 x y zs)
+  have "\<exists>l1 t1 l2 t2. x = Labeled l1 t1 \<and> y = Labeled l2 t2 \<and> l1 < l \<and> l < l2" if "witness_pair l (x # y # zs)" "\<not>witness_pair l (y # zs)"
+    using that
+    by (cases x; cases y) auto
+  moreover have "l1 < l \<Longrightarrow> l < l2 \<Longrightarrow> witness_pair l (ys @ Labeled l1 t1 # Labeled l2 t2 # zs)" for ys :: "('a, 'b, 'c) htree list" and l1 t1 l2 t2 zs
+  proof (induction ys rule: induct_list012)
+    case (2 x)
+    then show ?case
+      by (cases x) auto
+  next
+    case (3 x y zs)
+    then show ?case
+      by (cases x; cases y) auto
+  qed auto
+  ultimately show ?case
+    using 3(2)
+    apply (cases "witness_pair l (y # zs)")
+    apply (metis append_Cons)
+    by fastforce
+qed auto
+
+lemma witness_pair_absent_label[intro]: "witness_pair l xs \<Longrightarrow> absent_label l xs"
+  by (auto simp: witness_pair_iff intro: absent_label.intros)
+
+definition absent_label_code :: "'l :: linorder \<Rightarrow> ('l, 'h, 'b) htree list \<Rightarrow> bool" where
+  "absent_label_code l xs = (case xs of [] \<Rightarrow> True
+  | _ \<Rightarrow> (case hd xs of Labeled l2 _ \<Rightarrow> l < l2 | _ \<Rightarrow> False) \<or> (case last xs of Labeled l1 _ \<Rightarrow> l1 < l | _ \<Rightarrow> False) \<or> witness_pair l xs)"
+
+lemma absent_label_code[code]: "absent_label l xs = absent_label_code l xs"
+proof (rule iffI)
+  assume "absent_label l xs"
+  then show "absent_label_code l xs"
+  proof (induction l xs rule: absent_label.induct)
+    case (1 l1 l l2 xs uu uv ys)
+    then have "witness_pair l (xs @ Labeled l1 uu # Labeled l2 uv # ys)"
+      by (fastforce simp: witness_pair_iff)
+    then show ?case
+      by (auto simp: absent_label_code_def split: list.splits)
+  next
+    case (3 l1 l xs ux)
+    then show ?case
+      by (auto simp: absent_label_code_def split: list.splits) (metis htree.simps(27) last_ConsR last_snoc)
+  qed (auto simp: absent_label_code_def)
+next
+  assume "absent_label_code l xs"
+  then show "absent_label l xs"
+    apply (auto simp: absent_label_code_def split: list.splits intro: absent_label.intros)
+     apply (auto split: htree.splits if_splits intro: absent_label.intros)
+     apply (simp add: absent_label.simps)
+    by (metis absent_label.intros(3) append_butlast_last_id last_ConsR list.distinct(1))
+qed
+
+
+
 (* State transitions *)
 
-locale machine = fixes
+context fixes
   CANISTER_ERROR :: reject_code
   and CANISTER_REJECT :: reject_code
   and SYS_FATAL :: reject_code
@@ -531,13 +631,21 @@ locale machine = fixes
   and MAX_CYCLES_PER_MESSAGE :: nat
   and MAX_CYCLES_PER_RESPONSE :: nat
   and MAX_CANISTER_BALANCE :: nat
-  and ic_request_auth_delegation :: 'b
-  and ic_request :: 'b
+  and ic_root_public_key :: 'pk
   and ic_idle_cycles_burned_rate :: "('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> 'canid \<Rightarrow> nat"
   and blob_empty :: 'b
   and blob_length :: "'b \<Rightarrow> nat"
   and blob_concat :: "'b \<Rightarrow> 'b \<Rightarrow> 'b"
-  and sha_256 :: "'b \<Rightarrow> 'b"
+  and self_delimiting_blob_of_nat :: "nat \<Rightarrow> 'b"
+  and blob_of_text :: "'s \<Rightarrow> 'b"
+  and blob_of_label :: "'l :: linorder \<Rightarrow> 'b"
+  and blob_of_hash :: "'h \<Rightarrow> 'b"
+  and blob_of_pk :: "'pk \<Rightarrow> 'b"
+  and label_of_text :: "'s \<Rightarrow> 'l"
+  and label_of_principal :: "'p \<Rightarrow> 'l"
+  and sha_256 :: "'b \<Rightarrow> 'h"
+  and hash_of_sender_delegation :: "('p, 'canid, 'pk, 'sig) sender_delegation \<Rightarrow> 'b"
+  and hash_of_user_request :: "('b, 'p, 'uid, 'canid, 's) request + ('b, 'uid, 'canid, 's) APIReadRequest \<Rightarrow> 'b"
   and blob_of_candid :: "('s, 'b, 'p) candid \<Rightarrow> 'b"
   and parse_candid :: "'b \<Rightarrow> ('s, 'b, 'p) candid option"
   and parse_principal :: "'b \<Rightarrow> 'p option"
@@ -556,10 +664,8 @@ locale machine = fixes
   and anonymous_id :: "'p"
   and ic_principal :: "'canid"
   and verify_signature :: "'pk \<Rightarrow> 'sig \<Rightarrow> 'b \<Rightarrow> bool"
-  and hash_of_delegation :: "('p, 'canid, 'pk, 'sig) delegation \<Rightarrow> 'b"
-  and hash_of_user_request :: "('b, 'p, 'uid, 'canid, 's) request + ('b, 'uid, 'canid, 's) APIReadRequest \<Rightarrow> 'b"
-assumes hash_of_delegation_length: "blob_length (hash_of_delegation del) = 32"
-  and hash_of_user_request_length: "blob_length (hash_of_user_request con) = 32"
+  and verify_bls_signature :: "'pk \<Rightarrow> 'sig \<Rightarrow> 'b \<Rightarrow> bool"
+  and extract_der :: "'b \<Rightarrow> 'pk option"
 begin
 
 (* Type conversion functions *)
@@ -662,17 +768,23 @@ definition is_effective_canister_id :: "('b, 'p, 'uid, 'canid, 's) request \<Rig
 
 (* Envelope Authentication *)
 
-definition delegation_targets :: "('p, 'canid, 'pk, 'sig) delegation \<Rightarrow> 'canid set" where
+definition domain_sep :: "'b \<Rightarrow> 'b" where
+  "domain_sep b = blob_concat (self_delimiting_blob_of_nat (blob_length b)) b"
+
+definition blob_of_string :: "string \<Rightarrow> 'b" where
+  "blob_of_string = blob_of_text \<circ> encode_string"
+
+definition delegation_targets :: "('p, 'canid, 'pk, 'sig) sender_delegation \<Rightarrow> 'canid set" where
   "delegation_targets d = (case targets d of None \<Rightarrow> UNIV | Some ts \<Rightarrow> set ts)"
 
-definition delegated_senders :: "('p, 'canid, 'pk, 'sig) delegation \<Rightarrow> 'p set" where
+definition delegated_senders :: "('p, 'canid, 'pk, 'sig) sender_delegation \<Rightarrow> 'p set" where
   "delegated_senders d = (case senders d of None \<Rightarrow> UNIV | Some ts \<Rightarrow> set ts)"
 
 fun verify_delegations :: "('p, 'canid, 'pk, 'sig) signed_delegation list \<Rightarrow> 'pk \<Rightarrow> nat \<Rightarrow> 'canid set \<Rightarrow> 'uid \<Rightarrow> ('pk \<times> ('canid set)) option" where
   "verify_delegations [] pk t ts u = Some (pk, ts)"
 | "verify_delegations (d # ds) pk t ts u = (
     let del = delegation d in
-    (if verify_signature pk (signature d) (blob_concat ic_request_auth_delegation (hash_of_delegation del)) \<and>
+    (if verify_signature pk (signature d) (blob_concat (domain_sep (blob_of_string ''ic-request-auth-delegation'')) (hash_of_sender_delegation del)) \<and>
       expiration del \<ge> t \<and> principal_of_uid u \<in> delegated_senders del
     then verify_delegations ds (pubkey del) t (ts \<inter> delegation_targets del) u
     else None)
@@ -683,12 +795,47 @@ definition verify_envelope :: "('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope \<
     (case (sender_pubkey e, sender_sig e) of (Some pk, Some sig) \<Rightarrow>
       if principal_of_uid u = mk_self_authenticating_id pk then
         (case verify_delegations (sender_delegation e) pk t UNIV u of Some (pk', ts) \<Rightarrow>
-          if verify_signature pk' sig (blob_concat ic_request (hash_of_user_request (content e))) then
+          if verify_signature pk' sig (blob_concat (domain_sep (blob_of_string ''ic-request'')) (hash_of_user_request (content e))) then
             principal_of_canid ` ts
           else {}
         | _ \<Rightarrow> {})
       else {}
     | _ \<Rightarrow> {}))"
+
+(* Certification *)
+
+definition label_of_string :: "string \<Rightarrow> 'l" where
+  "label_of_string = label_of_text \<circ> encode_string"
+
+fun reconstruct :: "('l, 'h, 'b) htree \<Rightarrow> 'h" where
+  "reconstruct Empty = sha_256 (domain_sep (blob_of_string ''ic-hashtree-empty''))"
+| "reconstruct (Fork t1 t2) = sha_256 (blob_concat (blob_concat (domain_sep (blob_of_string ''ic-hashtree-fork'')) (blob_of_hash (reconstruct t1))) (blob_of_hash (reconstruct t2)))"
+| "reconstruct (Labeled l t) = sha_256 (blob_concat (blob_concat (domain_sep (blob_of_string ''ic-hashtree-labeled'')) (blob_of_label l)) (blob_of_hash (reconstruct t)))"
+| "reconstruct (Leaf v) = sha_256 (blob_concat (domain_sep (blob_of_string ''ic-hashtree-leaf'')) v)"
+| "reconstruct (Pruned h) = h"
+
+function(sequential) verify_cert :: "('l, 'h, 'b, 'p, 'sig) certificate \<Rightarrow> bool" and check_delegation :: "('l, 'h, 'b, 'p, 'sig) delegation option \<Rightarrow> 'b option" where
+  "verify_cert cert = (
+    let root_hash = reconstruct (cert_tree cert) in
+    (case check_delegation (cert_delegation cert) of None \<Rightarrow> False
+    | Some der_key \<Rightarrow>
+      (case extract_der der_key of None \<Rightarrow> False
+      | Some bls_key \<Rightarrow> verify_bls_signature bls_key (cert_signature cert) (blob_concat (domain_sep (blob_of_string ''ic-state-root'')) (blob_of_hash root_hash)))
+    )
+  )"
+| "check_delegation None = Some (blob_of_pk ic_root_public_key)"
+| "check_delegation (Some d) = (if verify_cert (certificate d) then
+    (case lookup [label_of_string ''subnet'', label_of_principal (subnet_id d), label_of_string ''public_key''] (certificate d) of Found v \<Rightarrow> Some v)
+  else None)"
+  by pat_completeness auto
+termination
+  apply (relation "measure (\<lambda>v. case v of Inl cert \<Rightarrow> size cert | Inr None \<Rightarrow> 0 | Inr (Some d) \<Rightarrow> size d)")
+  apply auto[1]
+  subgoal for c d
+    by (cases c) (auto split: option.splits)
+  subgoal for d
+    by (cases d) auto
+  done
 
 
 
@@ -1535,7 +1682,7 @@ definition ic_canister_status_post :: "nat \<Rightarrow> nat \<Rightarrow> ('p, 
   "ic_canister_status_post n m S = (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     let cid = the (candid_parse_cid a);
     hash = (case the (list_map_get (canisters S) cid) of None \<Rightarrow> Candid_null
-      | Some can \<Rightarrow> Candid_opt (Candid_blob (sha_256 (raw_module can)))) in
+      | Some can \<Rightarrow> Candid_opt (Candid_blob (blob_of_hash (sha_256 (raw_module can))))) in
     S\<lparr>messages := take n (messages S) @ drop (Suc n) (messages S) @ [Response_message orig (Reply (blob_of_candid
       (Candid_record (list_map_init [(encode_string ''status'', candid_of_status (simple_status (the (list_map_get (canister_status S) cid)))),
         (encode_string ''module_hash'', hash),
@@ -2885,7 +3032,6 @@ lemma ic_inv:
 
 end
 
-(*TODO: instantiate locale machine and export names
 export_code request_submission_pre request_submission_post
   request_rejection_pre request_rejection_post
   initiate_canister_call_pre initiate_canister_call_post
@@ -2922,6 +3068,5 @@ export_code request_submission_pre request_submission_post
   cycle_consumption_pre cycle_consumption_post
   system_time_progress_pre system_time_progress_post
 in Haskell module_name IC file_prefix code
-*)
 
 end

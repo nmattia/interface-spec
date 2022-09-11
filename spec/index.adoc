@@ -1837,20 +1837,24 @@ The IC will certify states by issuing certificates where the tree is a partial s
 
 More formally, a certificate is described by the following data structure:
 ....
-Certificate = {
-  tree : HashTree
-  signature : Signature
-  delegation : NoDelegation | Delegation
-}
+Label = Blob
+Hash = Blob
 HashTree
   = Empty
   | Fork HashTree HashTree
   | Labeled Label HashTree
   | Leaf blob
   | Pruned Hash
-Label = Blob
-Hash = Blob
 Signature = Blob
+Certificate = {
+  tree : HashTree
+  signature : Signature
+  delegation : NoDelegation | Delegation
+}
+Delegation = {
+  subnet_id : Principal
+  certificate : Certificate
+}
 ....
 
 A certificate is validated with regard to the root of trust by the following algorithm (which uses `check_delegation` defined in <<certification-delegation>>):
@@ -1875,7 +1879,7 @@ verify_bls_signature : PublicKey -> Signature -> Blob -> Bool
 ....
 is the https://tools.ietf.org/html/draft-irtf-cfrg-bls-signature-04#section-4[BLS signature verification function], ciphersuite BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_. See that document also for details on the encoding of BLS public keys and signatures, and
 ....
-extract_der : Blob -> Blob
+extract_der : Blob -> PublicKey
 ....
 implements DER decoding of the public key, following https://tools.ietf.org/html/rfc5480[RFC4580] using OID 1.3.6.1.4.1.44668.5.3.1.2.1 for the algorithm and 1.3.6.1.4.1.44668.5.3.2.1 for the curve.
 
@@ -1893,7 +1897,16 @@ The following algorithm looks up a `path` in a certificate, and returns either
  * `Error`, if the path does not make sense for this certificate:
 
 ....
-lookup(path, cert) = lookup_path(path, cert.tree)
+flatten_forks(Empty) = []
+flatten_forks(Fork t1 t2) = flatten_forks(t1) · flatten_forks(t2)
+flatten_forks(t) = [t]
+
+find_label(l, _ · Labeled l1 t · _)                | l == l1     = Found t
+find_label(l, _ · Labeled l1 _ · Labeled l2 _ · _) | l1 < l < l2 = Absent
+find_label(l,                    Labeled l2 _ · _) |      l < l2 = Absent
+find_label(l, _ · Labeled l1 _ )                   | l1 < l      = Absent
+find_label(l, [])                                                = Absent
+find_label(l, _)                                                 = Unknown
 
 lookup_path([], Empty) = Absent
 lookup_path([], Leaf v) = v
@@ -1908,16 +1921,7 @@ lookup_path(l::ls, tree) =
   | Error -> Error
   | Found subtree -> lookup_path ls subtree
 
-flatten_forks(Empty) = []
-flatten_forks(Fork t1 t2) = flatten_forks(t1) · flatten_forks(t2)
-flatten_forks(t) = [t]
-
-find_label(l, _ · Labeled l1 t · _)                | l == l1     = Found t
-find_label(l, _ · Labeled l1 _ · Labeled l2 _ · _) | l1 < l < l2 = Absent
-find_label(l,                    Labeled l2 _ · _) |      l < l2 = Absent
-find_label(l, _ · Labeled l1 _ )                   | l1 < l      = Absent
-find_label(l, [])                                                = Absent
-find_label(l, _)                                                 = Unknown
+lookup(path, cert) = lookup_path(path, cert.tree)
 ....
 
 The IC will only produce well-formed state trees, and the above algorithm assumes well-formed trees. These have the property that labeled subtrees appear in strictly increasing order of labels, and are not mixed with leaves. More formally:
@@ -1926,9 +1930,9 @@ well_formed(tree) =
   (tree = Leaf _) ∨ (well_formed_forest(flatten_forks(tree)))
 
 well_formed_forest(trees) =
-  strictly_increasing([l | Label l _ ∈ trees]) ∧
-  ∀ Label _ t ∈ trees. well_formed(t) ∧
-  ∀ t ∈ trees ≠ Leaf _
+  strictly_increasing([l | Labeled l _ ∈ trees]) ∧
+  ∀ Labeled _ t ∈ trees. well_formed(t) ∧
+  ∀ t ∈ trees. t ≠ Leaf _
 ....
 
 [#certification-delegation]
@@ -1939,20 +1943,13 @@ The root key can delegate certification authority to other keys.
 A certificate by the root subnet does not have a delegation field. A certificate by other subnets include a delegation, which is itself a certificate that proves that the subnet is listed in the root subnet’s state tree (see <<state-tree-subnet>>), and reveals its public key.
 
 NOTE: The nested certificate _typically_ does not itself again contain a delegation, although there is no reason why agents should enforce that property.
-....
-Delegation =
- Delegation {
-   subnet_id : Principal;
-   certificate : Certificate;
- }
-....
 
 A chain of delegations is verified using the following algorithm, which also returns the delegated key (a DER-encoded BLS key):
 
 ....
-check_delegation(NoDelegation) : public_bls_key =
+check_delegation(NoDelegation) : Blob =
   return root_public_key
-check_delegation(Delegation d) : public_bls_key =
+check_delegation(Delegation d) : Blob =
   verify_cert(d.certificate)
   return lookup(["subnet",d.subnet_id,"public_key"],d.certificate)
 ....
