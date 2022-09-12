@@ -3788,25 +3788,25 @@ Conditions::
   lookup(["canister",Q.canister_id,"certified_data"], Cert) = Found S.certified_data[Q.canister_id]
   lookup(["time"], Cert) = Found S.system_time // or “recent enough”
   Env = {
-    time = S.time[Q.receiver];
+    time = S.time[Q.canister_id];
     balance = S.balances[Q.canister_id];
     freezing_limit = freezing_limit(S, Q.canister_id);
     certificate = Cert;
-    status = simple_status(S.canister_status[Q.receiver]);
+    status = Running;
   }
 ....
 Read response::
-* If `F(Q.Arg, Q.sender, Env) = Trap trap` then
+* If `F(Q.Arg, Q.sender, Env)(C.wasm_state) = Trap trap` then
 +
 ....
 {status: rejected; reject_code: CANISTER_ERROR, reject_message: <implementation-specific>, error_code: <implementation-specific>}
 ....
-* Else if `F(Q.Arg, Q.sender, Env) = Return {response = Reject (code, msg); …}` then
+* Else if `F(Q.Arg, Q.sender, Env)(C.wasm_state) = Return {response = Reject (code, msg); …}` then
 +
 ....
 {status: rejected; reject_code: <code>: reject_message: <msg>, error_code: <implementation-specific>}
 ....
-* Else if `F(Q.Arg, Q.sender, Env) = Return {response = Reply R; …}` then
+* Else if `F(Q.Arg, Q.sender, Env)(C.wasm_state) = Return {response = Reply R; …}` then
 +
 ....
 {status: success; reply: { arg :  <R> } }

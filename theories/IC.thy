@@ -184,9 +184,13 @@ record ('b) env =
   status :: status
 
 type_synonym reject_code = nat
-datatype ('b, 's) response =
-  Reply "'b"
-| Reject reject_code 's
+type_synonym error_code = nat
+datatype ('b, 's) response
+  = Reply "'b"
+  | Reject reject_code 's
+datatype ('b, 's) query_response
+  = Success 'b
+  | Rejected reject_code 's error_code
 record ('p, 'canid, 's, 'b, 'c) method_call =
   callee :: 'canid
   method_name :: "'s method_name"
@@ -251,7 +255,7 @@ lift_definition dispatch_method :: "'s \<Rightarrow> ('p, 'canid, 'b, 'w, 'sm, '
 
 (* Call contexts *)
 
-record ('b, 'p, 'uid, 'canid, 's) request =
+record ('b, 'uid, 'canid, 's) request =
   nonce :: 'b
   ingress_expiry :: nat
   sender :: 'uid
@@ -259,7 +263,7 @@ record ('b, 'p, 'uid, 'canid, 's) request =
   method_name :: 's
   arg :: 'b
 datatype ('b, 'p, 'uid, 'canid, 's, 'c, 'cid) call_origin =
-  From_user "('b, 'p, 'uid, 'canid, 's) request"
+  From_user "('b, 'uid, 'canid, 's) request"
 | From_canister "'cid" "'c"
 | From_heartbeat
 record ('p, 'uid, 'canid, 'b, 's, 'c, 'cid) call_ctxt_rep =
@@ -339,14 +343,7 @@ record ('b, 'uid) StateRead =
   ingress_expiry :: nat
   sender :: 'uid
   paths :: "'b path list"
-record ('b, 'uid, 'canid, 's) CanisterQuery =
-  nonce :: 'b
-  ingress_expiry :: nat
-  sender :: 'uid
-  canister_id :: 'canid
-  method_name :: 's
-  arg :: 'b
-type_synonym ('b, 'uid, 'canid, 's) APIReadRequest = "('b, 'uid) StateRead + ('b, 'uid, 'canid, 's) CanisterQuery"
+type_synonym ('b, 'uid, 'canid, 's) APIReadRequest = "('b, 'uid, 'canid, 's) request + ('b, 'uid) StateRead"
 
 record ('p, 'canid, 'pk, 'sig) sender_delegation =
   pubkey :: 'pk
@@ -358,7 +355,7 @@ record ('p, 'canid, 'pk, 'sig) signed_delegation =
   signature :: "'sig"
 
 record ('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope =
-  content :: "('b, 'p, 'uid, 'canid, 's) request + ('b, 'uid, 'canid, 's) APIReadRequest"
+  content :: "('b, 'uid, 'canid, 's) request + ('b, 'uid, 'canid, 's) APIReadRequest"
   sender_pubkey :: "'pk option"
   sender_sig :: "'sig option"
   sender_delegation :: "('p, 'canid, 'pk, 'sig) signed_delegation list"
@@ -376,7 +373,7 @@ record ('p, 'canid, 'b, 'w, 'sm, 'c, 's) can_state_rec =
 type_synonym ('p, 'canid, 'b, 'w, 'sm, 'c, 's) can_state = "('p, 'canid, 'b, 'w, 'sm, 'c, 's) can_state_rec option"
 datatype ('b, 'p, 'uid, 'canid, 's, 'c, 'cid) can_status = Running | Stopping "(('b, 'p, 'uid, 'canid, 's, 'c, 'cid) call_origin \<times> nat) list" | Stopped
 record ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic =
-  requests :: "(('b, 'p, 'uid, 'canid, 's) request, ('b, 's) request_status) list_map"
+  requests :: "(('b, 'uid, 'canid, 's) request, ('b, 's) request_status) list_map"
   canisters :: "('canid, ('p, 'canid, 'b, 'w, 'sm, 'c, 's) can_state) list_map"
   controllers :: "('canid,  'p set) list_map"
   freezing_threshold :: "('canid,  nat) list_map"
@@ -631,21 +628,25 @@ context fixes
   and MAX_CYCLES_PER_MESSAGE :: nat
   and MAX_CYCLES_PER_RESPONSE :: nat
   and MAX_CANISTER_BALANCE :: nat
+  and query_reject_msg :: 's
+  and query_error_code :: error_code
   and ic_root_public_key :: 'pk
   and ic_idle_cycles_burned_rate :: "('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> 'canid \<Rightarrow> nat"
   and blob_empty :: 'b
   and blob_length :: "'b \<Rightarrow> nat"
   and blob_concat :: "'b \<Rightarrow> 'b \<Rightarrow> 'b"
   and self_delimiting_blob_of_nat :: "nat \<Rightarrow> 'b"
+  and blob_of_nat :: "nat \<Rightarrow> 'b"
   and blob_of_text :: "'s \<Rightarrow> 'b"
   and blob_of_label :: "'l :: linorder \<Rightarrow> 'b"
   and blob_of_hash :: "'h \<Rightarrow> 'b"
   and blob_of_pk :: "'pk \<Rightarrow> 'b"
+  and blob_of_certificate :: "('l, 'h, 'b, 'p, 'sig) certificate \<Rightarrow> 'b"
   and label_of_text :: "'s \<Rightarrow> 'l"
   and label_of_principal :: "'p \<Rightarrow> 'l"
   and sha_256 :: "'b \<Rightarrow> 'h"
   and hash_of_sender_delegation :: "('p, 'canid, 'pk, 'sig) sender_delegation \<Rightarrow> 'b"
-  and hash_of_user_request :: "('b, 'p, 'uid, 'canid, 's) request + ('b, 'uid, 'canid, 's) APIReadRequest \<Rightarrow> 'b"
+  and hash_of_user_request :: "('b, 'uid, 'canid, 's) request + ('b, 'uid, 'canid, 's) APIReadRequest \<Rightarrow> 'b"
   and blob_of_candid :: "('s, 'b, 'p) candid \<Rightarrow> 'b"
   and parse_candid :: "'b \<Rightarrow> ('s, 'b, 'p) candid option"
   and parse_principal :: "'b \<Rightarrow> 'p option"
@@ -760,7 +761,7 @@ fun message_queue :: "('b, 'p, 'uid, 'canid, 's, 'c, 'cid) message \<Rightarrow>
 
 (* Effective canister IDs *)
 
-definition is_effective_canister_id :: "('b, 'p, 'uid, 'canid, 's) request \<Rightarrow> 'p \<Rightarrow> bool" where
+definition is_effective_canister_id :: "('b, 'uid, 'canid, 's) request \<Rightarrow> 'p \<Rightarrow> bool" where
   "is_effective_canister_id r p = (if request.canister_id r = ic_principal then
     request.method_name r = encode_string ''provisional_create_canister_with_cycles'' \<or>
       (case candid_parse_cid (request.arg r) of Some cid \<Rightarrow> principal_of_canid cid = p | _ \<Rightarrow> False)
@@ -940,10 +941,10 @@ lemma request_submission_ic_inv:
 
 (* System transition: Request rejection [DONE] *)
 
-definition request_rejection_pre :: "('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope \<Rightarrow> ('b, 'p, 'uid, 'canid, 's) request \<Rightarrow> reject_code \<Rightarrow> 's \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition request_rejection_pre :: "('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope \<Rightarrow> ('b, 'uid, 'canid, 's) request \<Rightarrow> reject_code \<Rightarrow> 's \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
   "request_rejection_pre E req code msg S = (list_map_get (requests S) req = Some Received \<and> (code = SYS_FATAL \<or> code = SYS_TRANSIENT))"
 
-definition request_rejection_post :: "('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope \<Rightarrow> ('b, 'p, 'uid, 'canid, 's) request \<Rightarrow> reject_code \<Rightarrow> 's \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition request_rejection_post :: "('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope \<Rightarrow> ('b, 'uid, 'canid, 's) request \<Rightarrow> reject_code \<Rightarrow> 's \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
   "request_rejection_post E req code msg S = S\<lparr>requests := list_map_set (requests S) req (Rejected code msg)\<rparr>"
 
 lemma request_rejection_cycles_inv:
@@ -962,13 +963,13 @@ lemma request_rejection_ic_inv:
 
 (* System transition: Initiating canister calls [DONE] *)
 
-definition initiate_canister_call_pre :: "('b, 'p, 'uid, 'canid, 's) request \<Rightarrow>
+definition initiate_canister_call_pre :: "('b, 'uid, 'canid, 's) request \<Rightarrow>
   ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
   "initiate_canister_call_pre req S = (list_map_get (requests S) req = Some Received \<and>
     system_time S \<le> request.ingress_expiry req \<and>
     request.canister_id req \<in> list_map_dom (canisters S))"
 
-definition initiate_canister_call_post :: "('b, 'p, 'uid, 'canid, 's) request \<Rightarrow>
+definition initiate_canister_call_post :: "('b, 'uid, 'canid, 's) request \<Rightarrow>
   ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow>
   ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
   "initiate_canister_call_post req S =
@@ -2728,12 +2729,12 @@ lemma respond_to_user_request_ic_inv:
 
 (* System transition: Request clean up [DONE] *)
 
-definition request_cleanup_pre :: "('b, 'p, 'uid, 'canid, 's) request \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition request_cleanup_pre :: "('b, 'uid, 'canid, 's) request \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
   "request_cleanup_pre req S = (case list_map_get (requests S) req of Some req_status \<Rightarrow>
     (case req_status of Replied _ \<Rightarrow> True | Rejected _ _ \<Rightarrow> True | _ \<Rightarrow> False)
     | _ \<Rightarrow> False)"
 
-definition request_cleanup_post :: "('b, 'p, 'uid, 'canid, 's) request \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition request_cleanup_post :: "('b, 'uid, 'canid, 's) request \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
   "request_cleanup_post req S = (S\<lparr>requests := list_map_set (requests S) req Done\<rparr>)"
 
 lemma request_cleanup_cycles_inv:
@@ -2753,13 +2754,13 @@ lemma request_cleanup_ic_inv:
 
 (* System transition: Request clean up (expired) [DONE] *)
 
-definition request_cleanup_expired_pre :: "('b, 'p, 'uid, 'canid, 's) request \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition request_cleanup_expired_pre :: "('b, 'uid, 'canid, 's) request \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
   "request_cleanup_expired_pre req S = (case list_map_get (requests S) req of Some req_status \<Rightarrow>
     (case req_status of Replied _ \<Rightarrow> True | Rejected _ _ \<Rightarrow> True | Done \<Rightarrow> True | _ \<Rightarrow> False) \<and>
     request.ingress_expiry req < system_time S
     | _ \<Rightarrow> False)"
 
-definition request_cleanup_expired_post :: "('b, 'p, 'uid, 'canid, 's) request \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition request_cleanup_expired_post :: "('b, 'uid, 'canid, 's) request \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
   "request_cleanup_expired_post req S = (S\<lparr>requests := list_map_del (requests S) req\<rparr>)"
 
 lemma request_cleanup_expired_cycles_inv:
@@ -3030,6 +3031,34 @@ lemma ic_inv:
   using system_time_progress_ic_inv apply fastforce
   done
 
+
+
+(* Query call *)
+
+definition query_call :: "('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope \<Rightarrow> 'p \<Rightarrow> ('l, 'h, 'b, 'p, 'sig) certificate \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('b, 's) query_response option" where
+  "query_call E ECID Cert S = (case content E of Inr (Inl q) \<Rightarrow>
+    let cid = canister_id q in
+    if principal_of_canid cid \<in> verify_envelope E (request.sender q) (system_time S) \<and>
+      is_effective_canister_id q ECID \<and>
+      system_time S \<le> request.ingress_expiry q \<and>
+      verify_cert Cert \<and>
+      lookup [label_of_string ''time''] Cert = Found (blob_of_nat (system_time S)) then
+      (case (list_map_get (canisters S) cid, list_map_get (canister_status S) cid, list_map_get (balances S) cid, list_map_get (time S) cid, list_map_get (certified_data S) cid) of
+        (Some (Some can), Some Running, Some bal, Some t, Some data) \<Rightarrow>
+        if bal \<ge> ic_freezing_limit S cid \<and> lookup [label_of_string ''canister'', label_of_principal (principal_of_canid cid), label_of_string ''certified_data''] Cert = Found data then
+          (case list_map_get (canister_module_query_methods (module can)) (request.method_name q) of Some F \<Rightarrow>
+            let Env = \<lparr>env.time = t, balance = bal, freezing_limit = ic_freezing_limit S cid, certificate = Some (blob_of_certificate Cert), status = status.Running\<rparr> in
+            (case F (request.arg q, principal_of_uid (request.sender q), Env) (wasm_state can) of Inl _ \<Rightarrow> Some (query_response.Rejected CANISTER_ERROR query_reject_msg query_error_code)
+            | Inr r \<Rightarrow>
+              (case response r of Reply b \<Rightarrow> Some (query_response.Success b)
+              | response.Reject code msg \<Rightarrow> Some (query_response.Rejected code msg query_error_code))
+            )
+          | _ \<Rightarrow> None)
+        else None
+      | _ \<Rightarrow> None)
+    else None
+  | _ \<Rightarrow> None)"
+
 end
 
 export_code request_submission_pre request_submission_post
@@ -3067,6 +3096,7 @@ export_code request_submission_pre request_submission_post
   canister_time_progress_pre canister_time_progress_post
   cycle_consumption_pre cycle_consumption_post
   system_time_progress_pre system_time_progress_post
+  query_call
 in Haskell module_name IC file_prefix code
 
 end
