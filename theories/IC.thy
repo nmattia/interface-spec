@@ -372,7 +372,7 @@ record ('p, 'canid, 'b, 'w, 'sm, 'c, 's) can_state_rec =
   private_custom_sections :: "('s, 'b) list_map"
 type_synonym ('p, 'canid, 'b, 'w, 'sm, 'c, 's) can_state = "('p, 'canid, 'b, 'w, 'sm, 'c, 's) can_state_rec option"
 datatype ('b, 'p, 'uid, 'canid, 's, 'c, 'cid) can_status = Running | Stopping "(('b, 'p, 'uid, 'canid, 's, 'c, 'cid) call_origin \<times> nat) list" | Stopped
-record ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic =
+record ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic =
   requests :: "(('b, 'uid, 'canid, 's) request, ('b, 's) request_status) list_map"
   canisters :: "('canid, ('p, 'canid, 'b, 'w, 'sm, 'c, 's) can_state) list_map"
   controllers :: "('canid,  'p set) list_map"
@@ -384,7 +384,9 @@ record ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic =
   system_time :: timestamp
   call_contexts :: "('cid, ('p, 'uid, 'canid, 'b, 's, 'c, 'cid) call_ctxt) list_map"
   messages :: "('b, 'p, 'uid, 'canid, 's, 'c, 'cid) message list"
-  root_key :: 'pk
+  subnets :: "('p \<times> 'pk \<times> 'sk \<times> (('canid \<times> 'canid) list)) list"
+  public_root_key :: 'pk
+  secret_root_key :: 'sk
 
 fun simple_status :: "('b, 'p, 'uid, 'canid, 's, 'c, 'cid) can_status \<Rightarrow> status" where
   "simple_status can_status.Running = status.Running"
@@ -393,8 +395,8 @@ fun simple_status :: "('b, 'p, 'uid, 'canid, 's, 'c, 'cid) can_status \<Rightarr
 
 (* Initial state *)
 
-definition initial_ic :: "nat \<Rightarrow> 'pk \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
-  "initial_ic t pk = \<lparr>requests = list_map_empty,
+definition initial_ic :: "nat \<Rightarrow> 'pk \<Rightarrow> 'sk \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
+  "initial_ic t pk sk = \<lparr>requests = list_map_empty,
     canisters = list_map_empty,
     controllers = list_map_empty,
     freezing_threshold = list_map_empty,
@@ -405,7 +407,9 @@ definition initial_ic :: "nat \<Rightarrow> 'pk \<Rightarrow> ('p, 'uid, 'canid,
     system_time = t,
     call_contexts = list_map_empty,
     messages = [],
-    root_key = pk\<rparr>"
+    subnets = [],
+    public_root_key = pk,
+    secret_root_key = sk\<rparr>"
 
 (* Invariants *)
 
@@ -444,7 +448,7 @@ lemma ic_can_status_inv_del: "ic_can_status_inv x z \<Longrightarrow>
   ic_can_status_inv x (z - {ctxt_id})"
   by (fastforce simp: ic_can_status_inv_def split: can_status.splits call_origin.splits)
 
-definition ic_inv :: "('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition ic_inv :: "('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "ic_inv S = ((\<forall>msg \<in> set (messages S). case msg of
     Call_message (From_canister ctxt_id _) _ _ _ _ _ _ \<Rightarrow> ctxt_id \<in> list_map_dom (call_contexts S)
   | Response_message (From_canister ctxt_id _) _ _ \<Rightarrow> ctxt_id \<in> list_map_dom (call_contexts S)
@@ -454,7 +458,7 @@ definition ic_inv :: "('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Ri
     | _ \<Rightarrow> True)) \<and>
   ic_can_status_inv (list_map_range (canister_status S)) (list_map_dom (call_contexts S)))"
 
-lemma ic_initial_inv: "ic_inv (initial_ic t pk)"
+lemma ic_initial_inv: "ic_inv (initial_ic t pk sk)"
   by (auto simp: ic_inv_def ic_can_status_inv_def initial_ic_def split: call_origin.splits)
 
 (* Candid *)
@@ -630,24 +634,24 @@ context fixes
   and MAX_CANISTER_BALANCE :: nat
   and query_reject_msg :: 's
   and query_error_code :: error_code
+  and request_error_code :: error_code
   and ic_root_public_key :: 'pk
-  and ic_idle_cycles_burned_rate :: "('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> 'canid \<Rightarrow> nat"
+  and ic_idle_cycles_burned_rate :: "('p :: linorder, 'uid, 'canid, 'b :: linorder, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> 'canid \<Rightarrow> nat"
   and blob_empty :: 'b
   and blob_length :: "'b \<Rightarrow> nat"
   and blob_concat :: "'b \<Rightarrow> 'b \<Rightarrow> 'b"
   and self_delimiting_blob_of_nat :: "nat \<Rightarrow> 'b"
   and blob_of_nat :: "nat \<Rightarrow> 'b"
   and blob_of_text :: "'s \<Rightarrow> 'b"
-  and blob_of_label :: "'l :: linorder \<Rightarrow> 'b"
   and blob_of_hash :: "'h \<Rightarrow> 'b"
   and blob_of_pk :: "'pk \<Rightarrow> 'b"
-  and blob_of_certificate :: "('l, 'h, 'b, 'p, 'sig) certificate \<Rightarrow> 'b"
-  and label_of_text :: "'s \<Rightarrow> 'l"
-  and label_of_principal :: "'p \<Rightarrow> 'l"
+  and blob_of_certificate :: "('b, 'h, 'b, 'p, 'sig) certificate \<Rightarrow> 'b"
   and sha_256 :: "'b \<Rightarrow> 'h"
   and hash_of_sender_delegation :: "('p, 'canid, 'pk, 'sig) sender_delegation \<Rightarrow> 'b"
   and hash_of_user_request :: "('b, 'uid, 'canid, 's) request + ('b, 'uid, 'canid, 's) APIReadRequest \<Rightarrow> 'b"
   and blob_of_candid :: "('s, 'b, 'p) candid \<Rightarrow> 'b"
+  and cbor_of_principals :: "'p list \<Rightarrow> 'b"
+  and cbor_of_canister_ranges :: "('canid \<times> 'canid) list \<Rightarrow> 'b"
   and parse_candid :: "'b \<Rightarrow> ('s, 'b, 'p) candid option"
   and parse_principal :: "'b \<Rightarrow> 'p option"
   and blob_of_principal :: "'p \<Rightarrow> 'b"
@@ -664,6 +668,7 @@ context fixes
   and mk_derived_id :: "'p \<Rightarrow> 'b \<Rightarrow> 'p"
   and anonymous_id :: "'p"
   and ic_principal :: "'canid"
+  and sign :: "'sk \<Rightarrow> 'b \<Rightarrow> 'sig"
   and verify_signature :: "'pk \<Rightarrow> 'sig \<Rightarrow> 'b \<Rightarrow> bool"
   and verify_bls_signature :: "'pk \<Rightarrow> 'sig \<Rightarrow> 'b \<Rightarrow> bool"
   and extract_der :: "'b \<Rightarrow> 'pk option"
@@ -740,7 +745,7 @@ lemma call_ctxt_carried_cycles: "call_ctxt_carried_cycles ctxt = (if call_ctxt_n
 lemma call_ctxt_delete_carried_cycles[simp]: "call_ctxt_carried_cycles (call_ctxt_delete ctxt) = 0"
   by transfer auto
 
-definition total_cycles :: "('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> nat" where
+definition total_cycles :: "('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> nat" where
   "total_cycles ic = (
     let cycles_in_balances = list_map_sum_vals id (balances ic) in
     let cycles_in_messages = sum_list (map message_cycles (messages ic)) in
@@ -805,17 +810,14 @@ definition verify_envelope :: "('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope \<
 
 (* Certification *)
 
-definition label_of_string :: "string \<Rightarrow> 'l" where
-  "label_of_string = label_of_text \<circ> encode_string"
-
-fun reconstruct :: "('l, 'h, 'b) htree \<Rightarrow> 'h" where
+fun reconstruct :: "('b, 'h, 'b) htree \<Rightarrow> 'h" where
   "reconstruct Empty = sha_256 (domain_sep (blob_of_string ''ic-hashtree-empty''))"
 | "reconstruct (Fork t1 t2) = sha_256 (blob_concat (blob_concat (domain_sep (blob_of_string ''ic-hashtree-fork'')) (blob_of_hash (reconstruct t1))) (blob_of_hash (reconstruct t2)))"
-| "reconstruct (Labeled l t) = sha_256 (blob_concat (blob_concat (domain_sep (blob_of_string ''ic-hashtree-labeled'')) (blob_of_label l)) (blob_of_hash (reconstruct t)))"
+| "reconstruct (Labeled l t) = sha_256 (blob_concat (blob_concat (domain_sep (blob_of_string ''ic-hashtree-labeled'')) l) (blob_of_hash (reconstruct t)))"
 | "reconstruct (Leaf v) = sha_256 (blob_concat (domain_sep (blob_of_string ''ic-hashtree-leaf'')) v)"
 | "reconstruct (Pruned h) = h"
 
-function(sequential) verify_cert :: "('l, 'h, 'b, 'p, 'sig) certificate \<Rightarrow> bool" and check_delegation :: "('l, 'h, 'b, 'p, 'sig) delegation option \<Rightarrow> 'b option" where
+function(sequential) verify_cert :: "('b, 'h, 'b, 'p, 'sig) certificate \<Rightarrow> bool" and check_delegation :: "('b, 'h, 'b, 'p, 'sig) delegation option \<Rightarrow> 'b option" where
   "verify_cert cert = (
     let root_hash = reconstruct (cert_tree cert) in
     (case check_delegation (cert_delegation cert) of None \<Rightarrow> False
@@ -826,7 +828,7 @@ function(sequential) verify_cert :: "('l, 'h, 'b, 'p, 'sig) certificate \<Righta
   )"
 | "check_delegation None = Some (blob_of_pk ic_root_public_key)"
 | "check_delegation (Some d) = (if verify_cert (certificate d) then
-    (case lookup [label_of_string ''subnet'', label_of_principal (subnet_id d), label_of_string ''public_key''] (certificate d) of Found v \<Rightarrow> Some v)
+    (case lookup [blob_of_string ''subnet'', blob_of_principal (subnet_id d), blob_of_string ''public_key''] (certificate d) of Found v \<Rightarrow> Some v)
   else None)"
   by pat_completeness auto
 termination
@@ -842,10 +844,10 @@ termination
 
 (* System transition: API Request submission [DONE] *)
 
-definition ic_freezing_limit :: "('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> 'canid \<Rightarrow> nat" where
+definition ic_freezing_limit :: "('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> 'canid \<Rightarrow> nat" where
   "ic_freezing_limit S cid = ic_idle_cycles_burned_rate S cid * (the (list_map_get (freezing_threshold S) cid)) div (24 * 60 * 60)"
 
-definition request_submission_pre :: "('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope \<Rightarrow> 'p \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition request_submission_pre :: "('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope \<Rightarrow> 'p \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "request_submission_pre E ECID S = (case content E of Inl req \<Rightarrow>
     principal_of_canid (request.canister_id req) \<in> verify_envelope E (request.sender req) (system_time S) \<and>
     req \<notin> list_map_dom (requests S) \<and>
@@ -878,7 +880,7 @@ definition request_submission_pre :: "('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) enve
     )
   | _ \<Rightarrow> False)"
 
-definition request_submission_post :: "('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope \<Rightarrow> 'p \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition request_submission_post :: "('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope \<Rightarrow> 'p \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "request_submission_post E ECID S = (
     let req = projl (content E);
     cid = request.canister_id req;
@@ -891,7 +893,7 @@ definition request_submission_post :: "('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) env
       else balances S) in
     S\<lparr>requests := list_map_set (requests S) req Received, balances := balances\<rparr>)"
 
-definition request_submission_burned_cycles :: "('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope \<Rightarrow> 'p \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> nat" where
+definition request_submission_burned_cycles :: "('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope \<Rightarrow> 'p \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> nat" where
   "request_submission_burned_cycles E ECID S = (
     let req = projl (content E);
     cid = request.canister_id req in
@@ -941,10 +943,10 @@ lemma request_submission_ic_inv:
 
 (* System transition: Request rejection [DONE] *)
 
-definition request_rejection_pre :: "('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope \<Rightarrow> ('b, 'uid, 'canid, 's) request \<Rightarrow> reject_code \<Rightarrow> 's \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition request_rejection_pre :: "('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope \<Rightarrow> ('b, 'uid, 'canid, 's) request \<Rightarrow> reject_code \<Rightarrow> 's \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "request_rejection_pre E req code msg S = (list_map_get (requests S) req = Some Received \<and> (code = SYS_FATAL \<or> code = SYS_TRANSIENT))"
 
-definition request_rejection_post :: "('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope \<Rightarrow> ('b, 'uid, 'canid, 's) request \<Rightarrow> reject_code \<Rightarrow> 's \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition request_rejection_post :: "('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope \<Rightarrow> ('b, 'uid, 'canid, 's) request \<Rightarrow> reject_code \<Rightarrow> 's \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "request_rejection_post E req code msg S = S\<lparr>requests := list_map_set (requests S) req (Rejected code msg)\<rparr>"
 
 lemma request_rejection_cycles_inv:
@@ -964,14 +966,14 @@ lemma request_rejection_ic_inv:
 (* System transition: Initiating canister calls [DONE] *)
 
 definition initiate_canister_call_pre :: "('b, 'uid, 'canid, 's) request \<Rightarrow>
-  ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+  ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "initiate_canister_call_pre req S = (list_map_get (requests S) req = Some Received \<and>
     system_time S \<le> request.ingress_expiry req \<and>
     request.canister_id req \<in> list_map_dom (canisters S))"
 
 definition initiate_canister_call_post :: "('b, 'uid, 'canid, 's) request \<Rightarrow>
-  ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow>
-  ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+  ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow>
+  ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "initiate_canister_call_post req S =
     S\<lparr>requests := list_map_set (requests S) req Processing, messages :=
       Call_message (From_user req) (principal_of_uid (request.sender req)) (request.canister_id req) (request.method_name req)
@@ -993,7 +995,7 @@ lemma initiate_canister_call_ic_inv:
 
 (* System transition: Calls to stopped/stopping/frozen canisters are rejected [DONE] *)
 
-definition call_reject_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition call_reject_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "call_reject_pre n S = (n < length (messages S) \<and> (case messages S ! n of
     Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
       (q = Unordered \<or> (\<forall>j < n. message_queue (messages S ! j) \<noteq> Some q)) \<and>
@@ -1002,7 +1004,7 @@ definition call_reject_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm,
       | _ \<Rightarrow> (case list_map_get (balances S) cee of Some bal \<Rightarrow> bal < ic_freezing_limit S cee | _ \<Rightarrow> False))
     | _ \<Rightarrow> False))"
 
-definition call_reject_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition call_reject_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "call_reject_post n S = (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     S\<lparr>messages := take n (messages S) @ drop (Suc n) (messages S) @ [Response_message orig (response.Reject CANISTER_ERROR (encode_string ''canister not running'')) trans_cycles]\<rparr>)"
 
@@ -1038,7 +1040,7 @@ lemma call_reject_ic_inv:
 (* System transition: Call context creation: Public entry points [DONE] *)
 
 definition call_context_create_pre :: "nat \<Rightarrow> 'cid
-  \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+  \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "call_context_create_pre n ctxt_id S = (n < length (messages S) \<and> (case messages S ! n of
     Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
       (case list_map_get (canisters S) cee of Some (Some can) \<Rightarrow> True | _ \<Rightarrow> False) \<and>
@@ -1058,7 +1060,7 @@ lemma create_call_ctxt_origin[simp]: "call_ctxt_origin (create_call_ctxt cee ori
 lemma create_call_ctxt_carried_cycles[simp]: "call_ctxt_carried_cycles (create_call_ctxt cee orig trans_cycles) = carried_cycles orig + trans_cycles"
   by transfer auto
 
-definition call_context_create_post :: "nat \<Rightarrow> 'cid \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition call_context_create_post :: "nat \<Rightarrow> 'cid \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "call_context_create_post n ctxt_id S = (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     case list_map_get (balances S) cee of Some bal \<Rightarrow>
     S\<lparr>messages := list_update (messages S) n (Func_message ctxt_id cee (Public_method mn cer a) q),
@@ -1097,7 +1099,7 @@ lemma call_context_create_ic_inv:
 
 (* System transition: Call context creation: Heartbeat [DONE] *)
 
-definition call_context_heartbeat_pre :: "'canid \<Rightarrow> 'cid \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition call_context_heartbeat_pre :: "'canid \<Rightarrow> 'cid \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "call_context_heartbeat_pre cee ctxt_id S = (
     (case list_map_get (canisters S) cee of Some (Some can) \<Rightarrow> True | _ \<Rightarrow> False) \<and>
     list_map_get (canister_status S) cee = Some Running \<and>
@@ -1114,7 +1116,7 @@ lemma create_call_ctxt_heartbeat_needs_to_respond[simp]: "call_ctxt_needs_to_res
 lemma create_call_ctxt_heartbeat_carried_cycles[simp]: "call_ctxt_carried_cycles (create_call_ctxt_heartbeat cee) = 0"
   by transfer auto
 
-definition call_context_heartbeat_post :: "'canid \<Rightarrow> 'cid \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition call_context_heartbeat_post :: "'canid \<Rightarrow> 'cid \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "call_context_heartbeat_post cee ctxt_id S =
   (case list_map_get (balances S) cee of Some bal \<Rightarrow>
     S\<lparr>messages := Func_message ctxt_id cee Heartbeat (Queue System cee) # messages S,
@@ -1161,7 +1163,7 @@ fun exec_function :: "('s, 'p, 'b, 'c) entry_point \<Rightarrow> 'b env \<Righta
     canister_module_callbacks m (c, resp, ref_cycles, e, bal)"
 | "exec_function (entry_point.Heartbeat) e bal m = heartbeat_as_update ((canister_module_heartbeat m), e)"
 
-definition message_execution_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition message_execution_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "message_execution_pre n S =
     (n < length (messages S) \<and> (case messages S ! n of Func_message ctxt_id recv ep q \<Rightarrow>
     (q = Unordered \<or> (\<forall>j < n. message_queue (messages S ! j) \<noteq> Some q)) \<and>
@@ -1170,7 +1172,7 @@ definition message_execution_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w
       (Some (Some can), Some bal, Some can_status, Some t, Some ctxt) \<Rightarrow> True | _ \<Rightarrow> False)
     | _ \<Rightarrow> False))"
 
-definition message_execution_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition message_execution_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "message_execution_post n S = (case messages S ! n of Func_message ctxt_id recv ep q \<Rightarrow>
     (case (list_map_get (canisters S) recv, list_map_get (balances S) recv, list_map_get (canister_status S) recv,
       list_map_get (time S) recv, list_map_get (call_contexts S) ctxt_id) of
@@ -1211,7 +1213,7 @@ definition message_execution_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, '
             - min cyc_used (if Is_response then MAX_CYCLES_PER_RESPONSE else MAX_CYCLES_PER_MESSAGE))\<rparr>))
     | _ \<Rightarrow> undefined)"
 
-definition message_execution_burned_cycles :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> nat" where
+definition message_execution_burned_cycles :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> nat" where
   "message_execution_burned_cycles n S = (case messages S ! n of Func_message ctxt_id recv ep q \<Rightarrow>
     (case (list_map_get (canisters S) recv, list_map_get (balances S) recv, list_map_get (canister_status S) recv,
       list_map_get (time S) recv, list_map_get (call_contexts S) ctxt_id) of
@@ -1465,7 +1467,7 @@ qed
 
 (* System transition: Call context starvation [DONE] *)
 
-definition call_context_starvation_pre :: "'cid \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition call_context_starvation_pre :: "'cid \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "call_context_starvation_pre ctxt_id S =
   (case list_map_get (call_contexts S) ctxt_id of Some call_context \<Rightarrow>
     call_ctxt_needs_to_respond call_context \<and>
@@ -1480,7 +1482,7 @@ definition call_context_starvation_pre :: "'cid \<Rightarrow> ('p, 'uid, 'canid,
   | None \<Rightarrow> False)"
 
 definition call_context_starvation_post :: "'cid \<Rightarrow>
-  ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+  ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "call_context_starvation_post ctxt_id S = (
     case list_map_get (call_contexts S) ctxt_id of Some call_context \<Rightarrow>
     let msg = Response_message (call_ctxt_origin call_context) (response.Reject CANISTER_ERROR (encode_string ''starvation'')) (call_ctxt_available_cycles call_context)
@@ -1507,7 +1509,7 @@ lemma call_context_starvation_ic_inv:
 
 (* System transition: Call context removal [DONE] *)
 
-definition call_context_removal_pre :: "'cid \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition call_context_removal_pre :: "'cid \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "call_context_removal_pre ctxt_id S = (
     (case list_map_get (call_contexts S) ctxt_id of Some call_context \<Rightarrow>
       (\<not>call_ctxt_needs_to_respond call_context \<or>
@@ -1528,10 +1530,10 @@ definition call_context_removal_pre :: "'cid \<Rightarrow> ('p, 'uid, 'canid, 'b
     | None \<Rightarrow> False))"
 
 definition call_context_removal_post :: "'cid \<Rightarrow>
-  ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+  ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "call_context_removal_post ctxt_id S = S\<lparr>call_contexts := list_map_del (call_contexts S) ctxt_id\<rparr>"
 
-definition call_context_removal_burned_cycles :: "'cid \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> nat" where
+definition call_context_removal_burned_cycles :: "'cid \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> nat" where
   "call_context_removal_burned_cycles ctxt_id S = call_ctxt_available_cycles (the (list_map_get (call_contexts S) ctxt_id))"
 
 lemma call_context_removal_cycles_monotonic:
@@ -1553,7 +1555,7 @@ lemma call_context_removal_ic_inv:
 
 (* System transition: IC Management Canister: Canister creation [DONE] *)
 
-definition ic_canister_creation_pre :: "nat \<Rightarrow> 'canid \<Rightarrow> nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition ic_canister_creation_pre :: "nat \<Rightarrow> 'canid \<Rightarrow> nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "ic_canister_creation_pre n cid t S = (n < length (messages S) \<and> (case messages S ! n of
     Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
       (q = Unordered \<or> (\<forall>j < n. message_queue (messages S ! j) \<noteq> Some q)) \<and>
@@ -1569,7 +1571,7 @@ definition ic_canister_creation_pre :: "nat \<Rightarrow> 'canid \<Rightarrow> n
       cid \<notin> list_map_dom (canister_status S)
     | _ \<Rightarrow> False))"
 
-definition ic_canister_creation_post :: "nat \<Rightarrow> 'canid \<Rightarrow> nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition ic_canister_creation_post :: "nat \<Rightarrow> 'canid \<Rightarrow> nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "ic_canister_creation_post n cid t S = (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     let ctrls = (case candid_parse_controllers a of Some ctrls \<Rightarrow> ctrls | _ \<Rightarrow> {cer}) in
     S\<lparr>canisters := list_map_set (canisters S) cid None,
@@ -1615,7 +1617,7 @@ lemma ic_canister_creation_ic_inv:
 
 (* System transition: IC Management Canister: Changing settings [DONE] *)
 
-definition ic_update_settings_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition ic_update_settings_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "ic_update_settings_pre n S = (n < length (messages S) \<and> (case messages S ! n of
     Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
       (q = Unordered \<or> (\<forall>j < n. message_queue (messages S ! j) \<noteq> Some q)) \<and>
@@ -1626,7 +1628,7 @@ definition ic_update_settings_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, '
       | _ \<Rightarrow> False) | _ \<Rightarrow> False)
     | _ \<Rightarrow> False))"
 
-definition ic_update_settings_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition ic_update_settings_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "ic_update_settings_post n S = (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     let cid = the (candid_parse_cid a);
     ctrls = (case candid_parse_controllers a of Some ctrls \<Rightarrow> list_map_set (controllers S) cid ctrls | _ \<Rightarrow> controllers S);
@@ -1666,7 +1668,7 @@ lemma ic_update_settings_ic_inv:
 
 (* System transition: IC Management Canister: Canister status [DONE] *)
 
-definition ic_canister_status_pre :: "nat \<Rightarrow> nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition ic_canister_status_pre :: "nat \<Rightarrow> nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "ic_canister_status_pre n m S = (n < length (messages S) \<and> (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     (q = Unordered \<or> (\<forall>j < n. message_queue (messages S ! j) \<noteq> Some q)) \<and>
     cee = ic_principal \<and>
@@ -1679,7 +1681,7 @@ definition ic_canister_status_pre :: "nat \<Rightarrow> nat \<Rightarrow> ('p, '
     (case list_map_get (controllers S) cid of Some ctrls \<Rightarrow> cer \<in> ctrls | _ \<Rightarrow> False) | _ \<Rightarrow> False)
   | _ \<Rightarrow> False))"
 
-definition ic_canister_status_post :: "nat \<Rightarrow> nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition ic_canister_status_post :: "nat \<Rightarrow> nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "ic_canister_status_post n m S = (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     let cid = the (candid_parse_cid a);
     hash = (case the (list_map_get (canisters S) cid) of None \<Rightarrow> Candid_null
@@ -1724,7 +1726,7 @@ lemma ic_canister_status_ic_inv:
 
 (* System transition: IC Management Canister: Code installation [DONE] *)
 
-definition ic_code_installation_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition ic_code_installation_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "ic_code_installation_pre n S = (n < length (messages S) \<and> (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     (q = Unordered \<or> (\<forall>j < n. message_queue (messages S ! j) \<noteq> Some q)) \<and>
     cee = ic_principal \<and>
@@ -1746,7 +1748,7 @@ definition ic_code_installation_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b,
     | _ \<Rightarrow> False) | _ \<Rightarrow> False) | _ \<Rightarrow> False) | _ \<Rightarrow> False)
   | _ \<Rightarrow> False))"
 
-definition ic_code_installation_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition ic_code_installation_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "ic_code_installation_post n S = (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     (case candid_parse_cid a of Some cid \<Rightarrow>
     (case (candid_parse_text a [encode_string ''mode''], candid_parse_blob a [encode_string ''wasm_module''], candid_parse_blob a [encode_string ''arg'']) of
@@ -1761,7 +1763,7 @@ definition ic_code_installation_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b
       balances := list_map_set (balances S) cid (bal - cyc_used),
       messages := take n (messages S) @ drop (Suc n) (messages S) @ [Response_message orig (Reply (blob_of_candid Candid_empty)) trans_cycles]\<rparr>)))))"
 
-definition ic_code_installation_burned_cycles :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> nat" where
+definition ic_code_installation_burned_cycles :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> nat" where
   "ic_code_installation_burned_cycles n S = (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     (case candid_parse_cid a of Some cid \<Rightarrow>
     (case (candid_parse_blob a [encode_string ''wasm_module''], candid_parse_blob a [encode_string ''arg'']) of
@@ -1819,7 +1821,7 @@ qed
 
 (* System transition: IC Management Canister: Code upgrade [DONE] *)
 
-definition ic_code_upgrade_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition ic_code_upgrade_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "ic_code_upgrade_pre n S = (n < length (messages S) \<and> (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     (q = Unordered \<or> (\<forall>j < n. message_queue (messages S ! j) \<noteq> Some q)) \<and>
     cee = ic_principal \<and>
@@ -1843,7 +1845,7 @@ definition ic_code_upgrade_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 
     | _ \<Rightarrow> False) | _ \<Rightarrow> False) | _ \<Rightarrow> False) | _ \<Rightarrow> False)
   | _ \<Rightarrow> False))"
 
-definition ic_code_upgrade_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition ic_code_upgrade_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "ic_code_upgrade_post n S = (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     (case candid_parse_cid a of Some cid \<Rightarrow>
     (case (candid_parse_text a [encode_string ''mode''], candid_parse_blob a [encode_string ''wasm_module''], candid_parse_blob a [encode_string ''arg'']) of
@@ -1859,7 +1861,7 @@ definition ic_code_upgrade_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w,
       balances := list_map_set (balances S) cid (bal - (cycles_return.cycles_used pre_ret + cycles_return.cycles_used post_ret)),
       messages := take n (messages S) @ drop (Suc n) (messages S) @ [Response_message orig (Reply (blob_of_candid Candid_empty)) trans_cycles]\<rparr>)))))))"
 
-definition ic_code_upgrade_burned_cycles :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> nat" where
+definition ic_code_upgrade_burned_cycles :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> nat" where
   "ic_code_upgrade_burned_cycles n S = (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     (case candid_parse_cid a of Some cid \<Rightarrow>
     (case (candid_parse_text a [encode_string ''mode''], candid_parse_blob a [encode_string ''wasm_module''], candid_parse_blob a [encode_string ''arg'']) of
@@ -1920,7 +1922,7 @@ qed
 
 (* System transition: IC Management Canister: Code uninstallation [DONE] *)
 
-definition ic_code_uninstallation_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition ic_code_uninstallation_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "ic_code_uninstallation_pre n S = (n < length (messages S) \<and> (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     (q = Unordered \<or> (\<forall>j < n. message_queue (messages S ! j) \<noteq> Some q)) \<and>
     cee = ic_principal \<and>
@@ -1930,7 +1932,7 @@ definition ic_code_uninstallation_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, '
     | _ \<Rightarrow> False) | _ \<Rightarrow> False)
   | _ \<Rightarrow> False))"
 
-definition ic_code_uninstallation_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition ic_code_uninstallation_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "ic_code_uninstallation_post n S = (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     (case candid_parse_cid a of Some cid \<Rightarrow>
     let call_ctxt_to_msg = (\<lambda>ctxt.
@@ -1984,7 +1986,7 @@ lemma ic_code_uninstallation_ic_inv:
 
 (* System transition: IC Management Canister: Stopping a canister (running) [DONE] *)
 
-definition ic_canister_stop_running_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition ic_canister_stop_running_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "ic_canister_stop_running_pre n S = (n < length (messages S) \<and> (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     (q = Unordered \<or> (\<forall>j < n. message_queue (messages S ! j) \<noteq> Some q)) \<and>
     cee = ic_principal \<and>
@@ -1995,7 +1997,7 @@ definition ic_canister_stop_running_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid,
     | _ \<Rightarrow> False) | _ \<Rightarrow> False)
   | _ \<Rightarrow> False))"
 
-definition ic_canister_stop_running_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition ic_canister_stop_running_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "ic_canister_stop_running_post n S = (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     let cid = the (candid_parse_cid a) in
     S\<lparr>messages := take n (messages S) @ drop (Suc n) (messages S),
@@ -2042,7 +2044,7 @@ qed
 
 (* System transition: IC Management Canister: Stopping a canister (stopping) [DONE] *)
 
-definition ic_canister_stop_stopping_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition ic_canister_stop_stopping_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "ic_canister_stop_stopping_pre n S = (n < length (messages S) \<and> (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     (q = Unordered \<or> (\<forall>j < n. message_queue (messages S ! j) \<noteq> Some q)) \<and>
     cee = ic_principal \<and>
@@ -2053,7 +2055,7 @@ definition ic_canister_stop_stopping_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid
     | _ \<Rightarrow> False) | _ \<Rightarrow> False)
   | _ \<Rightarrow> False))"
 
-definition ic_canister_stop_stopping_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition ic_canister_stop_stopping_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "ic_canister_stop_stopping_post n S = (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     let cid = the (candid_parse_cid a) in
     (case list_map_get (canister_status S) cid of Some (Stopping os) \<Rightarrow>
@@ -2101,13 +2103,13 @@ qed
 
 (* System transition: IC Management Canister: Stopping a canister (done stopping) [DONE] *)
 
-definition ic_canister_stop_done_stopping_pre :: "'canid \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition ic_canister_stop_done_stopping_pre :: "'canid \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "ic_canister_stop_done_stopping_pre cid S =
     (case list_map_get (canister_status S) cid of Some (Stopping os) \<Rightarrow>
       (\<forall>ctxt \<in> list_map_range (call_contexts S). call_ctxt_deleted ctxt \<or> call_ctxt_canister ctxt \<noteq> cid)
     | _ \<Rightarrow> False)"
 
-definition ic_canister_stop_done_stopping_post :: "'canid \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition ic_canister_stop_done_stopping_post :: "'canid \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "ic_canister_stop_done_stopping_post cid S = (
     let orig_cycles_to_msg = (\<lambda>(or, cyc). Response_message or (Reply (blob_of_candid Candid_empty)) cyc) in
     (case list_map_get (canister_status S) cid of Some (Stopping os) \<Rightarrow>
@@ -2141,7 +2143,7 @@ lemma ic_canister_stop_done_stopping_ic_inv:
 
 (* System transition: IC Management Canister: Stopping a canister (stopped) [DONE] *)
 
-definition ic_canister_stop_stopped_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition ic_canister_stop_stopped_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "ic_canister_stop_stopped_pre n S = (n < length (messages S) \<and> (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     (q = Unordered \<or> (\<forall>j < n. message_queue (messages S ! j) \<noteq> Some q)) \<and>
     cee = ic_principal \<and>
@@ -2152,7 +2154,7 @@ definition ic_canister_stop_stopped_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid,
     | _ \<Rightarrow> False) | _ \<Rightarrow> False)
   | _ \<Rightarrow> False))"
 
-definition ic_canister_stop_stopped_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition ic_canister_stop_stopped_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "ic_canister_stop_stopped_post n S = (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     S\<lparr>messages := take n (messages S) @ drop (Suc n) (messages S) @ [Response_message orig (Reply (blob_of_candid Candid_empty)) trans_cycles]\<rparr>)"
 
@@ -2190,7 +2192,7 @@ lemma ic_canister_stop_stopped_ic_inv:
 
 (* System transition: IC Management Canister: Starting a canister (not stopping) [DONE] *)
 
-definition ic_canister_start_not_stopping_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition ic_canister_start_not_stopping_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "ic_canister_start_not_stopping_pre n S = (n < length (messages S) \<and> (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     (q = Unordered \<or> (\<forall>j < n. message_queue (messages S ! j) \<noteq> Some q)) \<and>
     cee = ic_principal \<and>
@@ -2202,7 +2204,7 @@ definition ic_canister_start_not_stopping_pre :: "nat \<Rightarrow> ('p, 'uid, '
     | _ \<Rightarrow> False) | _ \<Rightarrow> False)
   | _ \<Rightarrow> False))"
 
-definition ic_canister_start_not_stopping_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition ic_canister_start_not_stopping_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "ic_canister_start_not_stopping_post n S = (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     let cid = the (candid_parse_cid a) in
     S\<lparr>canister_status := list_map_set (canister_status S) cid Running,
@@ -2242,7 +2244,7 @@ lemma ic_canister_start_not_stopping_ic_inv:
 
 (* System transition: IC Management Canister: Starting a canister (stopping) [DONE] *)
 
-definition ic_canister_start_stopping_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition ic_canister_start_stopping_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "ic_canister_start_stopping_pre n S = (n < length (messages S) \<and> (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     (q = Unordered \<or> (\<forall>j < n. message_queue (messages S ! j) \<noteq> Some q)) \<and>
     cee = ic_principal \<and>
@@ -2253,7 +2255,7 @@ definition ic_canister_start_stopping_pre :: "nat \<Rightarrow> ('p, 'uid, 'cani
     | _ \<Rightarrow> False) | _ \<Rightarrow> False)
   | _ \<Rightarrow> False))"
 
-definition ic_canister_start_stopping_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition ic_canister_start_stopping_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "ic_canister_start_stopping_post n S = (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     let cid = the (candid_parse_cid a);
     orig_cycles_to_msg = (\<lambda>(or, cyc). Response_message or (response.Reject CANISTER_REJECT (encode_string ''Canister has been restarted'')) cyc) in
@@ -2303,7 +2305,7 @@ lemma ic_canister_start_stopping_ic_inv:
 
 (* System transition: IC Management Canister: Canister deletion [DONE] *)
 
-definition ic_canister_deletion_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition ic_canister_deletion_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "ic_canister_deletion_pre n S = (n < length (messages S) \<and> (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     (q = Unordered \<or> (\<forall>j < n. message_queue (messages S ! j) \<noteq> Some q)) \<and>
     cee = ic_principal \<and>
@@ -2314,7 +2316,7 @@ definition ic_canister_deletion_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b,
     | _ \<Rightarrow> False) | _ \<Rightarrow> False)
   | _ \<Rightarrow> False))"
 
-definition ic_canister_deletion_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition ic_canister_deletion_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "ic_canister_deletion_post n S = (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     let cid = the (candid_parse_cid a) in
     S\<lparr>canisters := list_map_del (canisters S) cid,
@@ -2326,7 +2328,7 @@ definition ic_canister_deletion_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b
       certified_data := list_map_del (certified_data S) cid,
       messages := take n (messages S) @ drop (Suc n) (messages S) @ [Response_message orig (Reply (blob_of_candid Candid_empty)) trans_cycles]\<rparr>)"
 
-definition ic_canister_deletion_burned_cycles :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> nat" where
+definition ic_canister_deletion_burned_cycles :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> nat" where
   "ic_canister_deletion_burned_cycles n S = (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     let cid = the (candid_parse_cid a) in the (list_map_get (balances S) cid))"
 
@@ -2365,7 +2367,7 @@ lemma ic_canister_deletion_ic_inv:
 
 (* System transition: IC Management Canister: Depositing cycles [DONE] *)
 
-definition ic_depositing_cycles_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition ic_depositing_cycles_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "ic_depositing_cycles_pre n S = (n < length (messages S) \<and> (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     (q = Unordered \<or> (\<forall>j < n. message_queue (messages S ! j) \<noteq> Some q)) \<and>
     cee = ic_principal \<and>
@@ -2376,7 +2378,7 @@ definition ic_depositing_cycles_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b,
     | _ \<Rightarrow> False) | _ \<Rightarrow> False)
   | _ \<Rightarrow> False))"
 
-definition ic_depositing_cycles_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition ic_depositing_cycles_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "ic_depositing_cycles_post n S = (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     let cid = the (candid_parse_cid a) in
     (case list_map_get (balances S) cid of Some bal \<Rightarrow>
@@ -2417,7 +2419,7 @@ lemma ic_depositing_cycles_ic_inv:
 
 (* System transition: IC Management Canister: Random numbers [DONE] *)
 
-definition ic_random_numbers_pre :: "nat \<Rightarrow> 'b \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition ic_random_numbers_pre :: "nat \<Rightarrow> 'b \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "ic_random_numbers_pre n b S = (n < length (messages S) \<and> (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     (q = Unordered \<or> (\<forall>j < n. message_queue (messages S ! j) \<noteq> Some q)) \<and>
     cee = ic_principal \<and>
@@ -2426,7 +2428,7 @@ definition ic_random_numbers_pre :: "nat \<Rightarrow> 'b \<Rightarrow> ('p, 'ui
     blob_length b = 32
   | _ \<Rightarrow> False))"
 
-definition ic_random_numbers_post :: "nat \<Rightarrow> 'b \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition ic_random_numbers_post :: "nat \<Rightarrow> 'b \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "ic_random_numbers_post n b S = (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     S\<lparr>messages := take n (messages S) @ drop (Suc n) (messages S) @ [Response_message orig (Reply (blob_of_candid (Candid_blob b))) trans_cycles]\<rparr>)"
 
@@ -2462,7 +2464,7 @@ lemma ic_random_numbers_ic_inv:
 
 (* System transition: IC Management Canister: Canister creation with cycles [DONE] *)
 
-definition ic_provisional_canister_creation_pre :: "nat \<Rightarrow> 'canid \<Rightarrow> nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition ic_provisional_canister_creation_pre :: "nat \<Rightarrow> 'canid \<Rightarrow> nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "ic_provisional_canister_creation_pre n cid t S = (n < length (messages S) \<and> (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     (case candid_parse_nat a [encode_string ''amount''] of Some cyc \<Rightarrow>
       (q = Unordered \<or> (\<forall>j < n. message_queue (messages S ! j) \<noteq> Some q)) \<and>
@@ -2477,7 +2479,7 @@ definition ic_provisional_canister_creation_pre :: "nat \<Rightarrow> 'canid \<R
       cid \<notin> list_map_dom (canister_status S)
     | _ \<Rightarrow> False) | _ \<Rightarrow> False))"
 
-definition ic_provisional_canister_creation_post :: "nat \<Rightarrow> 'canid \<Rightarrow> nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition ic_provisional_canister_creation_post :: "nat \<Rightarrow> 'canid \<Rightarrow> nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "ic_provisional_canister_creation_post n cid t S = (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     let cyc = the (candid_parse_nat a [encode_string ''amount'']) in
     S\<lparr>canisters := list_map_set (canisters S) cid None,
@@ -2490,7 +2492,7 @@ definition ic_provisional_canister_creation_post :: "nat \<Rightarrow> 'canid \<
         (Candid_record (list_map_init [(encode_string ''canister_id'', Candid_blob (blob_of_canid cid))])))) trans_cycles],
       canister_status := list_map_set (canister_status S) cid Running\<rparr>)"
 
-definition ic_provisional_canister_creation_minted_cycles :: "nat \<Rightarrow> 'canid \<Rightarrow> nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> nat" where
+definition ic_provisional_canister_creation_minted_cycles :: "nat \<Rightarrow> 'canid \<Rightarrow> nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> nat" where
   "ic_provisional_canister_creation_minted_cycles n cid t S = (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     the (candid_parse_nat a [encode_string ''amount'']))"
 
@@ -2527,7 +2529,7 @@ lemma ic_provisional_canister_creation_ic_inv:
 
 (* System transition: IC Management Canister: Top up canister [DONE] *)
 
-definition ic_top_up_canister_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition ic_top_up_canister_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "ic_top_up_canister_pre n S = (n < length (messages S) \<and> (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     (case (candid_parse_cid a, candid_parse_nat a [encode_string ''amount'']) of (Some cid, Some cyc) \<Rightarrow>
       (q = Unordered \<or> (\<forall>j < n. message_queue (messages S ! j) \<noteq> Some q)) \<and>
@@ -2536,14 +2538,14 @@ definition ic_top_up_canister_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, '
       cid \<in> list_map_dom (balances S)
     | _ \<Rightarrow> False) | _ \<Rightarrow> False))"
 
-definition ic_top_up_canister_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition ic_top_up_canister_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "ic_top_up_canister_post n S = (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     let cid = the (candid_parse_cid a);
     cyc = the (candid_parse_nat a [encode_string ''amount'']);
     bal = the (list_map_get (balances S) cid) in
     S\<lparr>balances := list_map_set (balances S) cid (bal + cyc)\<rparr>)"
 
-definition ic_top_up_canister_minted_cycles :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> nat" where
+definition ic_top_up_canister_minted_cycles :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> nat" where
   "ic_top_up_canister_minted_cycles n S = (case messages S ! n of Call_message orig cer cee mn a trans_cycles q \<Rightarrow>
     the (candid_parse_nat a [encode_string ''amount'']))"
 
@@ -2582,7 +2584,7 @@ lemma ic_top_up_canister_ic_inv:
 
 (* System transition: Callback invocation (not deleted) [DONE] *)
 
-definition callback_invocation_not_deleted_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition callback_invocation_not_deleted_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "callback_invocation_not_deleted_pre n S = (n < length (messages S) \<and> (case messages S ! n of Response_message (From_canister ctxt_id c) resp ref_cycles \<Rightarrow>
     (case list_map_get (call_contexts S) ctxt_id of Some ctxt \<Rightarrow>
       let cid = call_ctxt_canister ctxt in
@@ -2592,7 +2594,7 @@ definition callback_invocation_not_deleted_pre :: "nat \<Rightarrow> ('p, 'uid, 
     | _ \<Rightarrow> False)
   | _ \<Rightarrow> False))"
 
-definition callback_invocation_not_deleted_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition callback_invocation_not_deleted_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "callback_invocation_not_deleted_post n S = (case messages S ! n of Response_message (From_canister ctxt_id c) resp ref_cycles \<Rightarrow>
     (case list_map_get (call_contexts S) ctxt_id of Some ctxt \<Rightarrow>
       let cid = call_ctxt_canister ctxt in
@@ -2631,7 +2633,7 @@ lemma callback_invocation_not_deleted_ic_inv:
 
 (* System transition: Callback invocation (deleted) [DONE] *)
 
-definition callback_invocation_deleted_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition callback_invocation_deleted_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "callback_invocation_deleted_pre n S = (n < length (messages S) \<and> (case messages S ! n of Response_message (From_canister ctxt_id c) resp ref_cycles \<Rightarrow>
     (case list_map_get (call_contexts S) ctxt_id of Some ctxt \<Rightarrow>
       let cid = call_ctxt_canister ctxt in
@@ -2641,7 +2643,7 @@ definition callback_invocation_deleted_pre :: "nat \<Rightarrow> ('p, 'uid, 'can
     | _ \<Rightarrow> False)
   | _ \<Rightarrow> False))"
 
-definition callback_invocation_deleted_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition callback_invocation_deleted_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "callback_invocation_deleted_post n S = (case messages S ! n of Response_message (From_canister ctxt_id c) resp ref_cycles \<Rightarrow>
     (case list_map_get (call_contexts S) ctxt_id of Some ctxt \<Rightarrow>
       let cid = call_ctxt_canister ctxt in
@@ -2681,19 +2683,19 @@ lemma callback_invocation_deleted_ic_inv:
 
 (* System transition: Respond to user request [DONE] *)
 
-definition respond_to_user_request_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition respond_to_user_request_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "respond_to_user_request_pre n S = (n < length (messages S) \<and> (case messages S ! n of Response_message (From_user req) resp ref_cycles \<Rightarrow>
     (case list_map_get (requests S) req of Some Processing \<Rightarrow> True
     | _ \<Rightarrow> False)
   | _ \<Rightarrow> False))"
 
-definition respond_to_user_request_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition respond_to_user_request_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "respond_to_user_request_post n S = (case messages S ! n of Response_message (From_user req) resp ref_cycles \<Rightarrow>
     let req_resp = (case resp of Reply b \<Rightarrow> Replied b | response.Reject c b \<Rightarrow> Rejected c b) in
     S\<lparr>messages := take n (messages S) @ drop (Suc n) (messages S),
       requests := list_map_set (requests S) req req_resp\<rparr>)"
 
-definition respond_to_user_request_burned_cycles :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> nat" where
+definition respond_to_user_request_burned_cycles :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> nat" where
   "respond_to_user_request_burned_cycles n S = (case messages S ! n of Response_message (From_user req) resp ref_cycles \<Rightarrow>
     ref_cycles)"
 
@@ -2729,12 +2731,12 @@ lemma respond_to_user_request_ic_inv:
 
 (* System transition: Request clean up [DONE] *)
 
-definition request_cleanup_pre :: "('b, 'uid, 'canid, 's) request \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition request_cleanup_pre :: "('b, 'uid, 'canid, 's) request \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "request_cleanup_pre req S = (case list_map_get (requests S) req of Some req_status \<Rightarrow>
     (case req_status of Replied _ \<Rightarrow> True | Rejected _ _ \<Rightarrow> True | _ \<Rightarrow> False)
     | _ \<Rightarrow> False)"
 
-definition request_cleanup_post :: "('b, 'uid, 'canid, 's) request \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition request_cleanup_post :: "('b, 'uid, 'canid, 's) request \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "request_cleanup_post req S = (S\<lparr>requests := list_map_set (requests S) req Done\<rparr>)"
 
 lemma request_cleanup_cycles_inv:
@@ -2754,13 +2756,13 @@ lemma request_cleanup_ic_inv:
 
 (* System transition: Request clean up (expired) [DONE] *)
 
-definition request_cleanup_expired_pre :: "('b, 'uid, 'canid, 's) request \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition request_cleanup_expired_pre :: "('b, 'uid, 'canid, 's) request \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "request_cleanup_expired_pre req S = (case list_map_get (requests S) req of Some req_status \<Rightarrow>
     (case req_status of Replied _ \<Rightarrow> True | Rejected _ _ \<Rightarrow> True | Done \<Rightarrow> True | _ \<Rightarrow> False) \<and>
     request.ingress_expiry req < system_time S
     | _ \<Rightarrow> False)"
 
-definition request_cleanup_expired_post :: "('b, 'uid, 'canid, 's) request \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition request_cleanup_expired_post :: "('b, 'uid, 'canid, 's) request \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "request_cleanup_expired_post req S = (S\<lparr>requests := list_map_del (requests S) req\<rparr>)"
 
 lemma request_cleanup_expired_cycles_inv:
@@ -2780,11 +2782,11 @@ lemma request_cleanup_expired_ic_inv:
 
 (* System transition: Canister out of cycles [DONE] *)
 
-definition canister_out_of_cycles_pre :: "'canid \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition canister_out_of_cycles_pre :: "'canid \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "canister_out_of_cycles_pre cid S = (case list_map_get (balances S) cid of Some 0 \<Rightarrow> True
   | _ \<Rightarrow> False)"
 
-definition canister_out_of_cycles_post :: "'canid \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition canister_out_of_cycles_post :: "'canid \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "canister_out_of_cycles_post cid S = (
     let call_ctxt_to_msg = (\<lambda>ctxt.
       if call_ctxt_canister ctxt = cid \<and> call_ctxt_needs_to_respond ctxt then
@@ -2825,12 +2827,12 @@ lemma canister_out_of_cycles_ic_inv:
 
 (* System transition: Time progressing and cycle consumption (canister time) [DONE] *)
 
-definition canister_time_progress_pre :: "'canid \<Rightarrow> nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition canister_time_progress_pre :: "'canid \<Rightarrow> nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "canister_time_progress_pre cid t1 S = (case list_map_get (time S) cid of Some t0 \<Rightarrow>
       t0 < t1
     | _ \<Rightarrow> False)"
 
-definition canister_time_progress_post :: "'canid \<Rightarrow> nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition canister_time_progress_post :: "'canid \<Rightarrow> nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "canister_time_progress_post cid t1 S = (S\<lparr>time := list_map_set (time S) cid t1\<rparr>)"
 
 lemma canister_time_progress_cycles_inv:
@@ -2851,15 +2853,15 @@ lemma canister_time_progress_ic_inv:
 
 (* System transition: Time progressing and cycle consumption (cycle consumption) [DONE] *)
 
-definition cycle_consumption_pre :: "'canid \<Rightarrow> nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition cycle_consumption_pre :: "'canid \<Rightarrow> nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "cycle_consumption_pre cid b1 S = (case list_map_get (balances S) cid of Some b0 \<Rightarrow>
       0 \<le> b1 \<and> b1 < b0
     | _ \<Rightarrow> False)"
 
-definition cycle_consumption_post :: "'canid \<Rightarrow> nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition cycle_consumption_post :: "'canid \<Rightarrow> nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "cycle_consumption_post cid b1 S = (S\<lparr>balances := list_map_set (balances S) cid b1\<rparr>)"
 
-definition cycle_consumption_burned_cycles :: "'canid \<Rightarrow> nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> nat" where
+definition cycle_consumption_burned_cycles :: "'canid \<Rightarrow> nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> nat" where
   "cycle_consumption_burned_cycles cid b1 S = the (list_map_get (balances S) cid) - b1"
 
 lemma cycle_consumption_cycles_monotonic:
@@ -2882,10 +2884,10 @@ lemma cycle_consumption_ic_inv:
 
 (* System transition: Time progressing and cycle consumption (system time) [DONE] *)
 
-definition system_time_progress_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+definition system_time_progress_pre :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   "system_time_progress_pre t1 S = (system_time S < t1)"
 
-definition system_time_progress_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic" where
+definition system_time_progress_post :: "nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
   "system_time_progress_post t1 S = (S\<lparr>system_time := t1\<rparr>)"
 
 lemma system_time_progress_cycles_inv:
@@ -2906,8 +2908,8 @@ lemma system_time_progress_ic_inv:
 
 (* State machine *)
 
-inductive ic_steps :: "'sig itself \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow>
-  nat \<Rightarrow> nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> bool" where
+inductive ic_steps :: "'sig itself \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow>
+  nat \<Rightarrow> nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   ic_steps_refl: "ic_steps sig S 0 0 S"
 | request_submission: "ic_steps sig S0 minted burned S \<Longrightarrow> request_submission_pre (E :: ('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope) ECID S \<Longrightarrow> ic_steps sig S0 minted (burned + request_submission_burned_cycles E ECID S) (request_submission_post E ECID S)"
 | request_rejection: "ic_steps sig S0 minted burned S \<Longrightarrow> request_rejection_pre (E :: ('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope) req code msg S \<Longrightarrow> ic_steps sig S0 minted burned (request_rejection_post E req code msg S)"
@@ -3035,17 +3037,17 @@ lemma ic_inv:
 
 (* Query call *)
 
-definition query_call :: "('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope \<Rightarrow> 'p \<Rightarrow> ('l, 'h, 'b, 'p, 'sig) certificate \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk) ic \<Rightarrow> ('b, 's) query_response option" where
+definition query_call :: "('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope \<Rightarrow> 'p \<Rightarrow> ('b, 'h, 'b, 'p, 'sig) certificate \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('b, 's) query_response option" where
   "query_call E ECID Cert S = (case content E of Inr (Inl q) \<Rightarrow>
     let cid = canister_id q in
     if principal_of_canid cid \<in> verify_envelope E (request.sender q) (system_time S) \<and>
       is_effective_canister_id q ECID \<and>
       system_time S \<le> request.ingress_expiry q \<and>
       verify_cert Cert \<and>
-      lookup [label_of_string ''time''] Cert = Found (blob_of_nat (system_time S)) then
+      lookup [blob_of_string ''time''] Cert = Found (blob_of_nat (system_time S)) then
       (case (list_map_get (canisters S) cid, list_map_get (canister_status S) cid, list_map_get (balances S) cid, list_map_get (time S) cid, list_map_get (certified_data S) cid) of
         (Some (Some can), Some Running, Some bal, Some t, Some data) \<Rightarrow>
-        if bal \<ge> ic_freezing_limit S cid \<and> lookup [label_of_string ''canister'', label_of_principal (principal_of_canid cid), label_of_string ''certified_data''] Cert = Found data then
+        if bal \<ge> ic_freezing_limit S cid \<and> lookup [blob_of_string ''canister'', blob_of_principal (principal_of_canid cid), blob_of_string ''certified_data''] Cert = Found data then
           (case list_map_get (canister_module_query_methods (module can)) (request.method_name q) of Some F \<Rightarrow>
             let Env = \<lparr>env.time = t, balance = bal, freezing_limit = ic_freezing_limit S cid, certificate = Some (blob_of_certificate Cert), status = status.Running\<rparr> in
             (case F (request.arg q, principal_of_uid (request.sender q), Env) (wasm_state can) of Inl _ \<Rightarrow> Some (query_response.Rejected CANISTER_ERROR query_reject_msg query_error_code)
@@ -3056,6 +3058,141 @@ definition query_call :: "('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope \<Right
           | _ \<Rightarrow> None)
         else None
       | _ \<Rightarrow> None)
+    else None
+  | _ \<Rightarrow> None)"
+
+
+
+(* Certified state reads *)
+
+definition may_read_path :: "'p \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> 'uid \<Rightarrow> 'b path \<Rightarrow> bool" where
+  "may_read_path ECID S s p = (case p of a # bs \<Rightarrow>
+    (a = blob_of_string ''time'' \<and> bs = []) \<or>
+    (a = blob_of_string ''subnet'') \<or>
+    (a = blob_of_string ''request_status'' \<and>
+      (case bs of b # cs \<Rightarrow>
+        \<forall>r \<in> list_map_dom (requests S). hash_of_user_request (Inl r) = b \<longrightarrow> s = request.sender r \<and> is_effective_canister_id r ECID
+      | _ \<Rightarrow> False)
+    ) \<or>
+    (a = blob_of_string ''canister'' \<and>
+      (case bs of b # c # ds \<Rightarrow>
+        b = blob_of_principal ECID \<and>
+        (
+          (c = blob_of_string ''module_hash'' \<and> ds = []) \<or>
+          (c = blob_of_string ''controllers'' \<and> ds = []) \<or>
+          (c = blob_of_string ''metadata'' \<and>
+            (case ds of [name] \<Rightarrow>
+              (case canid_of_principal ECID of Some cid \<Rightarrow>
+                (case list_map_get (canisters S) cid of Some (Some can) \<Rightarrow>
+                  (name \<in> blob_of_text ` list_map_dom (public_custom_sections can)) \<or>
+                  (name \<in> blob_of_text ` list_map_dom (private_custom_sections can) \<and>
+                    (case list_map_get (controllers S) cid of Some ctrls \<Rightarrow> principal_of_uid s \<in> ctrls
+                    | _ \<Rightarrow> False)
+                  )
+                | _ \<Rightarrow> False)
+              | _ \<Rightarrow> False)
+            | _ \<Rightarrow> False)
+          )
+        )
+      | _ \<Rightarrow> False)
+    )
+  | _ \<Rightarrow> False)"
+
+definition fold_htree_of :: "('b \<times> ('b, 'h, 'b) htree) list \<Rightarrow> ('b, 'h, 'b) htree" where
+  "fold_htree_of lts = fold (\<lambda>(lab, tree) t. let n = Labeled lab tree in case t of Empty \<Rightarrow> n | _ \<Rightarrow> Fork n t) (rev (sort_key fst lts)) Empty"
+
+lemma wf_fold_htree_of: "(\<And>t. t \<in> snd ` set lts \<Longrightarrow> wf_tree t) \<Longrightarrow> distinct (map fst lts) \<Longrightarrow> wf_tree (fold_htree_of lts)"
+  oops
+
+fun request_status_tree :: "('b, 's) request_status \<Rightarrow> ('b, 'h, 'b) htree" where
+  "request_status_tree Received = Labeled (blob_of_string ''status'') (Leaf (blob_of_string ''Received''))"
+| "request_status_tree Processing = Labeled (blob_of_string ''status'') (Leaf (blob_of_string ''Processing''))"
+| "request_status_tree (Rejected code msg) = fold_htree_of
+    [(blob_of_string ''status'', Leaf (blob_of_string ''Rejected'')),
+    (blob_of_string ''reject_code'', Leaf (blob_of_nat code)),
+    (blob_of_string ''reject_message'', Leaf (blob_of_text msg)),
+    (blob_of_string ''error_code'', Leaf (blob_of_nat request_error_code))]"
+| "request_status_tree (Replied b) = fold_htree_of [(blob_of_string ''status'', Leaf (blob_of_string ''Replied'')),
+    (blob_of_string ''reply'', Leaf b)]"
+| "request_status_tree Done = Labeled (blob_of_string ''status'') (Leaf (blob_of_string ''Done''))"
+
+definition state_tree :: "('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('b, 'h, 'b) htree" where
+  "state_tree S = fold_htree_of
+    [(blob_of_string ''subnet'', fold_htree_of (map (\<lambda>(sid, pk, sk, rans). (blob_of_principal sid, fold_htree_of (
+      [(blob_of_string ''public_key'', Leaf (blob_of_pk pk)), (blob_of_string ''canister_ranges'', Leaf (cbor_of_canister_ranges rans))]
+    ))) (subnets S))),
+    (blob_of_string ''time'', (Leaf (blob_of_nat (system_time S)))),
+    (blob_of_string ''request_status'', fold_htree_of (map (\<lambda>(r, s).
+      (hash_of_user_request (Inl r), request_status_tree s)
+    ) (Rep_list_map (requests S)))),
+    (blob_of_string ''canister'', fold_htree_of (map (\<lambda>(cid, can).
+      (blob_of_principal (principal_of_canid cid), fold_htree_of (
+        (case can of None \<Rightarrow> [] | Some c \<Rightarrow> [(blob_of_string ''module_hash'', Leaf (blob_of_hash (sha_256 (raw_module c))))]) @
+        (case list_map_get (controllers S) cid of None \<Rightarrow> [] | Some ctrls \<Rightarrow>
+          [(blob_of_string ''controllers'', Leaf (cbor_of_principals (principal_list_of_set ctrls)))]
+        ) @
+        (case can of None \<Rightarrow> [] | Some c \<Rightarrow>
+          [(blob_of_string ''metadata'', fold_htree_of (map (\<lambda>(name, b). (blob_of_text name, Leaf b)) (Rep_list_map (public_custom_sections c) @ Rep_list_map (private_custom_sections c))))]
+        )
+    ))) (Rep_list_map (canisters S))))]"
+
+fun prune_htree :: "'b path list \<Rightarrow> 'b path \<Rightarrow> ('b, 'h, 'b) htree \<Rightarrow> ('b, 'h, 'b) htree" where
+  "prune_htree ps p (Empty) = Empty"
+| "prune_htree ps p (Fork t1 t2) = (case (prune_htree ps p t1, prune_htree ps p t2) of (Pruned h1, Pruned h2) \<Rightarrow> Pruned (reconstruct (Fork (Pruned h1) (Pruned h2))) | (t1', t2') \<Rightarrow> Fork t1' t2')"
+| "prune_htree ps p (Labeled l t) = (if p @ [l] \<in> set ps then Labeled l (prune_htree ps (p @ [l]) t) else Pruned (reconstruct (Labeled l t)))"
+| "prune_htree ps p (Leaf v) = (if p \<in> set ps then Leaf v else Pruned (reconstruct (Leaf v)))"
+| "prune_htree ps p (Pruned h) = Pruned h"
+
+lemma reconstruct_prune_htree[simp]: "reconstruct (prune_htree ps p t) = reconstruct t"
+  by (induction ps p t rule: prune_htree.induct) (auto split: htree.splits)
+
+definition pruned_state_tree :: "'b path list \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('b, 'h, 'b) htree" where
+  "pruned_state_tree ps S = prune_htree ps [] (state_tree S)"
+
+definition comp_cert :: "'b path list \<Rightarrow> 'p \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('b, 'h, 'b, 'p, 'sig) certificate" where
+  "comp_cert ps ECID S = (
+    let t = pruned_state_tree ps S;
+    h = blob_of_hash (reconstruct t);
+    st = pruned_state_tree [[blob_of_string ''time''], [blob_of_string ''subnet'']] S;
+    sh = blob_of_hash (reconstruct st) in
+    fold (\<lambda>(sid, pk, sk, rans) cert.
+      if (\<exists>(a, b) \<in> set rans. principal_of_canid a \<le> ECID \<and> ECID \<le> principal_of_canid b) then
+        Certificate t (sign sk h) (Some (Delegation sid (Certificate st (sign (secret_root_key S) sh) None)))
+      else cert) (subnets S) (Certificate t (sign (secret_root_key S) h) None)
+  )"
+
+lemma fold_cong: "(\<And>x z. x \<in> set xs \<Longrightarrow> f x z = g x z) \<Longrightarrow> fold f xs z = fold g xs z"
+  by (induction xs arbitrary: z rule: rev_induct) auto
+
+lemma fold_propI: "(\<And>x. x \<in> set xs \<Longrightarrow> Q x \<Longrightarrow> P (f x)) \<Longrightarrow> P z \<Longrightarrow> P (fold (\<lambda>x z. if Q x then f x else z) xs z)"
+  by (induction xs rule: rev_induct) auto
+
+lemma verify_cert_comp_cert:
+  shows "verify_cert (comp_cert ps ECID S)"
+proof -
+  define t where "t = pruned_state_tree ps S"
+  define h where "h = blob_of_hash (reconstruct t)"
+  define st where "st = pruned_state_tree [[blob_of_string ''time''], [blob_of_string ''subnet'']] S"
+  define sh where "sh = blob_of_hash (reconstruct st)"
+  have cc: "comp_cert ps ECID S = fold
+    (\<lambda>x. If (case x of (sid, pk, sk, rans) \<Rightarrow> \<exists>x\<in>set rans. case x of (a, b) \<Rightarrow> principal_of_canid a \<le> ECID \<and> ECID \<le> principal_of_canid b)
+      (case x of (sid, pk, sk, rans) \<Rightarrow> Certificate t (sign sk h) (Some (Delegation sid (Certificate st (sign (secret_root_key S) sh) None)))))
+    (subnets S) (Certificate t (sign (secret_root_key S) h) None)"
+    by (auto simp add: Let_def comp_cert_def t_def[symmetric] h_def[symmetric] st_def[symmetric] sh_def[symmetric] intro: fold_cong)
+  have "case check_delegation (cert_delegation (comp_cert ps ECID S)) of Some der_key \<Rightarrow> True | _ \<Rightarrow> False"
+    unfolding cc
+    apply (rule fold_propI)
+    oops
+
+definition read_state :: "('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope \<Rightarrow> 'p \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('b, 'h, 'b, 'p, 'sig) certificate option" where
+  "read_state E ECID S = (case content E of (Inr (Inr req)) \<Rightarrow>
+    let TS = verify_envelope E (sender req) (system_time S) in
+    if system_time S \<le> ingress_expiry req \<and>
+      (\<forall>p \<in> set (paths req). may_read_path ECID S (sender req) p) \<and>
+      (\<forall>p \<in> set (paths req). case p of a # b # _ \<Rightarrow> a = blob_of_string ''request_status'' \<longrightarrow>
+        (\<exists>r \<in> list_map_dom (requests S). hash_of_user_request (Inl r) = b \<and> principal_of_canid (request.canister_id r) \<in> TS)
+      | _ \<Rightarrow> True)
+    then Some (comp_cert (paths req) ECID S)
     else None
   | _ \<Rightarrow> None)"
 
@@ -3096,7 +3233,7 @@ export_code request_submission_pre request_submission_post
   canister_time_progress_pre canister_time_progress_post
   cycle_consumption_pre cycle_consumption_post
   system_time_progress_pre system_time_progress_post
-  query_call
+  query_call read_state
 in Haskell module_name IC file_prefix code
 
 end

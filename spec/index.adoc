@@ -3822,8 +3822,8 @@ Conditions::
   E.content = ReadState RS
   TS = verify_envelope(E, RS.sender, S.system_time)
   S.system_time <= RS.ingress_expiry
-  ∀ path ∈ RS.paths. may_read_path(S, R.sender, path)
-  ∀ ["request_status", Rid] · _ ∈ RS.paths.  ∃ R ∈ S.requests ∧ hash_of_map(R) = Rid ∧ R.canister_id ∈ TS
+  ∀ path ∈ RS.paths. may_read_path(S, RS.sender, path)
+  ∀ ["request_status", Rid] · _ ∈ RS.paths.  ∃ R ∈ dom(S.requests). hash_of_map(R) = Rid ∧ R.canister_id ∈ TS
 ....
 Read response::
 A record with
@@ -3832,8 +3832,9 @@ A record with
 The predicate `may_read_path` is defined as follows, implementing the access control outlined in <<http-read-state>>:
 ....
 may_read_path(S, _, ["time"]) = True
+may_read_path(S, _, ["subnet"] · _) = True
 may_read_path(S, _, ["request_status", Rid] · _) =
-  if ∃ R ∈ S.requests ∧ hash_of_map(R) = Rid
+  if ∃ R ∈ dom(S.requests). hash_of_map(R) = Rid
   then RS.sender == R.sender ∧ is_effective_canister_id(R, ECID)
   else True
 may_read_path(S, _, ["canister", cid, "module_hash"]) = cid == ECID
@@ -3853,28 +3854,28 @@ lookup(path, cert) = lookup_in_tree(path, state_tree(S))
 ....
 where `state_tree` constructs the a labeled tree from the IC state `S` and the (so far underspecified) set of subnets `subnets`, as per <<state-tree>>
 ....
+request_status_tree(Received) =
+  { "status": "Received" }
+request_status_tree(Processing) =
+  { "status": "Processing" }
+request_status_tree(Rejected (code,msg)) =
+  { "status": "Rejected"; "reject_code": code; "reject_message": msg, error_code: <implementation-specific>}
+request_status_tree(Replied arg) =
+  { "status": "Replied"; "reply": arg }
+request_status_tree(Done) =
+  { "status": "Done" }
+
 state_tree(S) = {
   "time": S.system_time;
-  "request_id": { request_id(R): request_status_tree(S) | (R ↦ S) ∈ S.requests };
+  "subnet": { subnet_id : { "public_key" : subnet_pk; "canister_ranges" : CBOR(subnet_canister_ranges) } | (subnet_id, subnet_pk, subnet_canister_ranges) ∈ subnets };
+  "request_id": { hash_of_map(R): request_status_tree(S) | (R ↦ S) ∈ S.requests };
   "canister":
     { canister_id :
         { "module_hash" : SHA256(C.raw_module) | if C ≠ EmptyCanister } ∪
         { "controllers" : CBOR(S.controllers[canister_id]) } ∪
-        { "metadata": { name: blob | (name, blob) ∈ S.canisters[canister_id].public_custom_sections ∪ S.canisters[canister_id].private_custom_sections } }
+        { "metadata": { name: blob | (name, blob) ∈ C.public_custom_sections ∪ C.private_custom_sections } }
     | (canister_id, C) ∈ S.canisters };
-  "subnet": { subnet_id : { "public_key" : pub } | (subnet_id, subnet_pk) ∈ subnets };
 }
-
-request_status_tree(Received) =
-  { "status": "received" }
-request_status_tree(Processing) =
-  { "status": "processing" }
-request_status_tree(Rejected (code,msg)) =
-  { "status": "rejected"; "reject_code": code; "reject_message": msg, error_code: <implementation-specific>}
-request_status_tree(Replied arg) =
-  { "status": "replied"; "reply": arg }
-request_status_tree(Done) =
-  { "status": "Done" }
 ....
 and where `lookup_in_tree` is a function that returns the value or `Absent` as appropriately.
 
