@@ -943,20 +943,20 @@ lemma request_submission_ic_inv:
 
 (* System transition: Request rejection [DONE] *)
 
-definition request_rejection_pre :: "('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope \<Rightarrow> ('b, 'uid, 'canid, 's) request \<Rightarrow> reject_code \<Rightarrow> 's \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
-  "request_rejection_pre E req code msg S = (list_map_get (requests S) req = Some Received \<and> (code = SYS_FATAL \<or> code = SYS_TRANSIENT))"
+definition request_rejection_pre :: "('b, 'uid, 'canid, 's) request \<Rightarrow> reject_code \<Rightarrow> 's \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
+  "request_rejection_pre req code msg S = (list_map_get (requests S) req = Some Received \<and> (code = SYS_FATAL \<or> code = SYS_TRANSIENT))"
 
-definition request_rejection_post :: "('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope \<Rightarrow> ('b, 'uid, 'canid, 's) request \<Rightarrow> reject_code \<Rightarrow> 's \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
-  "request_rejection_post E req code msg S = S\<lparr>requests := list_map_set (requests S) req (Rejected code msg)\<rparr>"
+definition request_rejection_post :: "('b, 'uid, 'canid, 's) request \<Rightarrow> reject_code \<Rightarrow> 's \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic" where
+  "request_rejection_post req code msg S = S\<lparr>requests := list_map_set (requests S) req (Rejected code msg)\<rparr>"
 
 lemma request_rejection_cycles_inv:
-  assumes "request_rejection_pre E req code msg S"
-  shows "total_cycles S = total_cycles (request_rejection_post E req code msg S)"
+  assumes "request_rejection_pre req code msg S"
+  shows "total_cycles S = total_cycles (request_rejection_post req code msg S)"
   by (auto simp: request_rejection_pre_def request_rejection_post_def total_cycles_def)
 
 lemma request_rejection_ic_inv:
-  assumes "request_rejection_pre E req code msg S" "ic_inv S"
-  shows "ic_inv (request_rejection_post E req code msg S)"
+  assumes "request_rejection_pre req code msg S" "ic_inv S"
+  shows "ic_inv (request_rejection_post req code msg S)"
   using assms
   by (auto simp: ic_inv_def request_rejection_pre_def request_rejection_post_def Let_def
       split: sum.splits message.splits call_origin.splits)
@@ -2912,7 +2912,7 @@ inductive ic_steps :: "'sig itself \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm,
   nat \<Rightarrow> nat \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> bool" where
   ic_steps_refl: "ic_steps sig S 0 0 S"
 | request_submission: "ic_steps sig S0 minted burned S \<Longrightarrow> request_submission_pre (E :: ('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope) ECID S \<Longrightarrow> ic_steps sig S0 minted (burned + request_submission_burned_cycles E ECID S) (request_submission_post E ECID S)"
-| request_rejection: "ic_steps sig S0 minted burned S \<Longrightarrow> request_rejection_pre (E :: ('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope) req code msg S \<Longrightarrow> ic_steps sig S0 minted burned (request_rejection_post E req code msg S)"
+| request_rejection: "ic_steps sig S0 minted burned S \<Longrightarrow> request_rejection_pre req code msg S \<Longrightarrow> ic_steps sig S0 minted burned (request_rejection_post req code msg S)"
 | initiate_canister_call: "ic_steps sig S0 minted burned S \<Longrightarrow> initiate_canister_call_pre req S \<Longrightarrow> ic_steps sig S0 minted burned (initiate_canister_call_post req S)"
 | call_reject: "ic_steps sig S0 minted burned S \<Longrightarrow> call_reject_pre n S \<Longrightarrow> ic_steps sig S0 minted burned (call_reject_post n S)"
 | call_context_create: "ic_steps sig S0 minted burned S \<Longrightarrow> call_context_create_pre n ctxt_id S \<Longrightarrow> ic_steps sig S0 minted burned (call_context_create_post n ctxt_id S)"
