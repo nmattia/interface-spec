@@ -3037,67 +3037,6 @@ lemma ic_inv:
 
 (* Query call *)
 
-definition query_call :: "('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope \<Rightarrow> 'p \<Rightarrow> ('b, 'h, 'b, 'p, 'sig) certificate \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('b, 's) query_response option" where
-  "query_call E ECID Cert S = (case content E of Inr (Inl q) \<Rightarrow>
-    let cid = canister_id q in
-    if principal_of_canid cid \<in> verify_envelope E (request.sender q) (system_time S) \<and>
-      is_effective_canister_id q ECID \<and>
-      system_time S \<le> request.ingress_expiry q \<and>
-      verify_cert Cert \<and>
-      lookup [blob_of_string ''time''] Cert = Found (blob_of_nat (system_time S)) then
-      (case (list_map_get (canisters S) cid, list_map_get (canister_status S) cid, list_map_get (balances S) cid, list_map_get (time S) cid, list_map_get (certified_data S) cid) of
-        (Some (Some can), Some Running, Some bal, Some t, Some data) \<Rightarrow>
-        if bal \<ge> ic_freezing_limit S cid \<and> lookup [blob_of_string ''canister'', blob_of_principal (principal_of_canid cid), blob_of_string ''certified_data''] Cert = Found data then
-          (case list_map_get (canister_module_query_methods (module can)) (request.method_name q) of Some F \<Rightarrow>
-            let Env = \<lparr>env.time = t, balance = bal, freezing_limit = ic_freezing_limit S cid, certificate = Some (blob_of_certificate Cert), status = status.Running\<rparr> in
-            (case F (request.arg q, principal_of_uid (request.sender q), Env) (wasm_state can) of Inl _ \<Rightarrow> Some (query_response.Rejected CANISTER_ERROR query_reject_msg query_error_code)
-            | Inr r \<Rightarrow>
-              (case response r of Reply b \<Rightarrow> Some (query_response.Success b)
-              | response.Reject code msg \<Rightarrow> Some (query_response.Rejected code msg query_error_code))
-            )
-          | _ \<Rightarrow> None)
-        else None
-      | _ \<Rightarrow> None)
-    else None
-  | _ \<Rightarrow> None)"
-
-
-
-(* Certified state reads *)
-
-definition may_read_path :: "'p \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> 'uid \<Rightarrow> 'b path \<Rightarrow> bool" where
-  "may_read_path ECID S s p = (case p of a # bs \<Rightarrow>
-    (a = blob_of_string ''time'' \<and> bs = []) \<or>
-    (a = blob_of_string ''subnet'') \<or>
-    (a = blob_of_string ''request_status'' \<and>
-      (case bs of b # cs \<Rightarrow>
-        \<forall>r \<in> list_map_dom (requests S). hash_of_user_request (Inl r) = b \<longrightarrow> s = request.sender r \<and> is_effective_canister_id r ECID
-      | _ \<Rightarrow> False)
-    ) \<or>
-    (a = blob_of_string ''canister'' \<and>
-      (case bs of b # c # ds \<Rightarrow>
-        b = blob_of_principal ECID \<and>
-        (
-          (c = blob_of_string ''module_hash'' \<and> ds = []) \<or>
-          (c = blob_of_string ''controllers'' \<and> ds = []) \<or>
-          (c = blob_of_string ''metadata'' \<and>
-            (case ds of [name] \<Rightarrow>
-              (case canid_of_principal ECID of Some cid \<Rightarrow>
-                (case list_map_get (canisters S) cid of Some (Some can) \<Rightarrow>
-                  (name \<in> blob_of_text ` list_map_dom (public_custom_sections can)) \<or>
-                  (name \<in> blob_of_text ` list_map_dom (private_custom_sections can) \<and>
-                    (case list_map_get (controllers S) cid of Some ctrls \<Rightarrow> principal_of_uid s \<in> ctrls
-                    | _ \<Rightarrow> False)
-                  )
-                | _ \<Rightarrow> False)
-              | _ \<Rightarrow> False)
-            | _ \<Rightarrow> False)
-          )
-        )
-      | _ \<Rightarrow> False)
-    )
-  | _ \<Rightarrow> False)"
-
 definition fold_htree_of :: "('b \<times> ('b, 'h, 'b) htree) list \<Rightarrow> ('b, 'h, 'b) htree" where
   "fold_htree_of lts = fold (\<lambda>(lab, tree) t. let n = Labeled lab tree in case t of Empty \<Rightarrow> n | _ \<Rightarrow> Fork n t) (rev (sort_key fst lts)) Empty"
 
@@ -3131,6 +3070,8 @@ definition state_tree :: "('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk
         (case list_map_get (controllers S) cid of None \<Rightarrow> [] | Some ctrls \<Rightarrow>
           [(blob_of_string ''controllers'', Leaf (cbor_of_principals (principal_list_of_set ctrls)))]
         ) @
+        (case list_map_get (certified_data S) cid of None \<Rightarrow> [] | Some data \<Rightarrow>
+          [(blob_of_string ''certified_data'', Leaf data)]) @
         (case can of None \<Rightarrow> [] | Some c \<Rightarrow>
           [(blob_of_string ''metadata'', fold_htree_of (map (\<lambda>(name, b). (blob_of_text name, Leaf b)) (Rep_list_map (public_custom_sections c) @ Rep_list_map (private_custom_sections c))))]
         )
@@ -3183,6 +3124,66 @@ proof -
     unfolding cc
     apply (rule fold_propI)
     oops
+
+definition query_call :: "('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope \<Rightarrow> 'p \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('b, 's) query_response option" where
+  "query_call E ECID S = (case content E of Inr (Inl q) \<Rightarrow>
+    let cid = canister_id q;
+    Cert = comp_cert [[blob_of_string ''time''], [blob_of_string ''canister'', blob_of_principal (principal_of_canid cid), blob_of_string ''certified_data'']] ECID S in
+    if principal_of_canid cid \<in> verify_envelope E (request.sender q) (system_time S) \<and>
+      is_effective_canister_id q ECID \<and>
+      system_time S \<le> request.ingress_expiry q then
+      (case (list_map_get (canisters S) cid, list_map_get (canister_status S) cid, list_map_get (balances S) cid, list_map_get (time S) cid) of
+        (Some (Some can), Some Running, Some bal, Some t) \<Rightarrow>
+        if bal \<ge> ic_freezing_limit S cid then
+          (case list_map_get (canister_module_query_methods (module can)) (request.method_name q) of Some F \<Rightarrow>
+            let Env = \<lparr>env.time = t, balance = bal, freezing_limit = ic_freezing_limit S cid, certificate = Some (blob_of_certificate Cert), status = status.Running\<rparr> in
+            (case F (request.arg q, principal_of_uid (request.sender q), Env) (wasm_state can) of Inl _ \<Rightarrow> Some (query_response.Rejected CANISTER_ERROR query_reject_msg query_error_code)
+            | Inr r \<Rightarrow>
+              (case response r of Reply b \<Rightarrow> Some (query_response.Success b)
+              | response.Reject code msg \<Rightarrow> Some (query_response.Rejected code msg query_error_code))
+            )
+          | _ \<Rightarrow> None)
+        else None
+      | _ \<Rightarrow> None)
+    else None
+  | _ \<Rightarrow> None)"
+
+
+
+(* Certified state reads *)
+
+definition may_read_path :: "'p \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> 'uid \<Rightarrow> 'b path \<Rightarrow> bool" where
+  "may_read_path ECID S s p = (case p of a # bs \<Rightarrow>
+    (a = blob_of_string ''time'' \<and> bs = []) \<or>
+    (a = blob_of_string ''subnet'') \<or>
+    (a = blob_of_string ''request_status'' \<and>
+      (case bs of b # cs \<Rightarrow>
+        \<forall>r \<in> list_map_dom (requests S). hash_of_user_request (Inl r) = b \<longrightarrow> s = request.sender r \<and> is_effective_canister_id r ECID
+      | _ \<Rightarrow> False)
+    ) \<or>
+    (a = blob_of_string ''canister'' \<and>
+      (case bs of b # c # ds \<Rightarrow>
+        b = blob_of_principal ECID \<and>
+        (
+          (c = blob_of_string ''module_hash'' \<and> ds = []) \<or>
+          (c = blob_of_string ''controllers'' \<and> ds = []) \<or>
+          (c = blob_of_string ''metadata'' \<and>
+            (case ds of [name] \<Rightarrow>
+              (case canid_of_principal ECID of Some cid \<Rightarrow>
+                (case list_map_get (canisters S) cid of Some (Some can) \<Rightarrow>
+                  (name \<in> blob_of_text ` list_map_dom (public_custom_sections can)) \<or>
+                  (name \<in> blob_of_text ` list_map_dom (private_custom_sections can) \<and>
+                    (case list_map_get (controllers S) cid of Some ctrls \<Rightarrow> principal_of_uid s \<in> ctrls
+                    | _ \<Rightarrow> False)
+                  )
+                | _ \<Rightarrow> False)
+              | _ \<Rightarrow> False)
+            | _ \<Rightarrow> False)
+          )
+        )
+      | _ \<Rightarrow> False)
+    )
+  | _ \<Rightarrow> False)"
 
 definition read_state :: "('b, 'p, 'uid, 'canid, 's, 'pk, 'sig) envelope \<Rightarrow> 'p \<Rightarrow> ('p, 'uid, 'canid, 'b, 'w, 'sm, 'c, 's, 'cid, 'pk, 'sk) ic \<Rightarrow> ('b, 'h, 'b, 'p, 'sig) certificate option" where
   "read_state E ECID S = (case content E of (Inr (Inr req)) \<Rightarrow>
