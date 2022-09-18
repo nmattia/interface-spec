@@ -603,6 +603,13 @@ termination
   by (relation "measure (\<lambda>v. case v of Inl t \<Rightarrow> Suc (htree_measure t) | Inr ts \<Rightarrow> size_list' htree_measure ts)")
      (auto intro: size_list'_size_flatten_forks dest: size_list'_inD[where ?sz=htree_measure])
 
+fun all_paths :: "path \<Rightarrow> htree \<Rightarrow> path set" where
+  "all_paths p Empty = {}"
+| "all_paths p (Fork t1 t2) = all_paths p t1 \<union> all_paths p t2"
+| "all_paths p (Labeled l t) = all_paths (p @ [l]) t"
+| "all_paths p (Leaf v) = {p}"
+| "all_paths p (Pruned t) = {}"
+
 (* Certification code *)
 
 fun witness_pair :: "blob \<Rightarrow> htree list \<Rightarrow> bool" where
@@ -691,6 +698,7 @@ context fixes
   and blob_of_candid :: "'p candid \<Rightarrow> blob"
   and cbor_of_principals :: "'p list \<Rightarrow> blob"
   and cbor_of_canister_ranges :: "('p \<times> 'p) list \<Rightarrow> blob"
+  and parse_cbor_canister_ranges :: "blob \<Rightarrow> ('p \<times> 'p) list option"
   and parse_candid :: "blob \<Rightarrow> 'p candid option"
   and parse_principal :: "blob \<Rightarrow> 'p option"
   and blob_of_principal :: "'p \<Rightarrow> blob"
@@ -804,9 +812,6 @@ definition is_effective_canister_id :: "'p request \<Rightarrow> 'p \<Rightarrow
 definition domain_sep :: "blob \<Rightarrow> blob" where
   "domain_sep b = (self_delimiting_blob_of_nat (length b)) @ b"
 
-definition blob_of_string :: "String.literal \<Rightarrow> blob" where
-  "blob_of_string = blob_of_text"
-
 definition delegation_targets :: "('p, 'pk, 'sig) sender_delegation \<Rightarrow> 'p set" where
   "delegation_targets d = (case targets d of None \<Rightarrow> UNIV | Some ts \<Rightarrow> set ts)"
 
@@ -817,7 +822,7 @@ fun verify_delegations :: "('p, 'pk, 'sig) signed_delegation list \<Rightarrow> 
   "verify_delegations [] pk t ts u = Some (pk, ts)"
 | "verify_delegations (d # ds) pk t ts u = (
     let del = delegation d in
-    (if verify_signature pk (signature d) (domain_sep (blob_of_string (STR ''ic-request-auth-delegation'')) @ hash_of_sender_delegation del) \<and>
+    (if verify_signature pk (signature d) (domain_sep (blob_of_text (STR ''ic-request-auth-delegation'')) @ hash_of_sender_delegation del) \<and>
       expiration del \<ge> t \<and> u \<in> delegated_senders del
     then verify_delegations ds (pubkey del) t (ts \<inter> delegation_targets del) u
     else None)
@@ -828,7 +833,7 @@ definition verify_envelope :: "('p, 'pk, 'sig) envelope \<Rightarrow> 'p \<Right
     (case (sender_pubkey e, sender_sig e) of (Some pk, Some sig) \<Rightarrow>
       if u = mk_self_authenticating_id pk then
         (case verify_delegations (sender_delegation e) pk t UNIV u of Some (pk', ts) \<Rightarrow>
-          if verify_signature pk' sig (domain_sep (blob_of_string (STR ''ic-request'')) @ hash_of_user_request (content e)) then ts
+          if verify_signature pk' sig (domain_sep (blob_of_text (STR ''ic-request'')) @ hash_of_user_request (content e)) then ts
           else {}
         | _ \<Rightarrow> {})
       else {}
@@ -837,34 +842,55 @@ definition verify_envelope :: "('p, 'pk, 'sig) envelope \<Rightarrow> 'p \<Right
 (* Certification *)
 
 fun reconstruct :: "htree \<Rightarrow> blob" where
-  "reconstruct Empty = sha_256 (domain_sep (blob_of_string (STR ''ic-hashtree-empty'')))"
-| "reconstruct (Fork t1 t2) = sha_256 (domain_sep (blob_of_string (STR ''ic-hashtree-fork'')) @ reconstruct t1 @ reconstruct t2)"
-| "reconstruct (Labeled l t) = sha_256 (domain_sep (blob_of_string (STR ''ic-hashtree-labeled'')) @ l @ reconstruct t)"
-| "reconstruct (Leaf v) = sha_256 (domain_sep (blob_of_string (STR ''ic-hashtree-leaf'')) @ v)"
+  "reconstruct Empty = sha_256 (domain_sep (blob_of_text (STR ''ic-hashtree-empty'')))"
+| "reconstruct (Fork t1 t2) = sha_256 (domain_sep (blob_of_text (STR ''ic-hashtree-fork'')) @ reconstruct t1 @ reconstruct t2)"
+| "reconstruct (Labeled l t) = sha_256 (domain_sep (blob_of_text (STR ''ic-hashtree-labeled'')) @ l @ reconstruct t)"
+| "reconstruct (Leaf v) = sha_256 (domain_sep (blob_of_text (STR ''ic-hashtree-leaf'')) @ v)"
 | "reconstruct (Pruned h) = h"
 
-function(sequential) verify_cert :: "'pk \<Rightarrow> ('p, 'sig) certificate \<Rightarrow> bool" and check_delegation :: "'pk \<Rightarrow> ('p, 'sig) delegation option \<Rightarrow> blob option" where
-  "verify_cert rk cert = (
-    let root_hash = reconstruct (cert_tree cert) in
-    (case check_delegation rk (cert_delegation cert) of None \<Rightarrow> False
-    | Some der_key \<Rightarrow>
-      (case extract_der der_key of None \<Rightarrow> False
-      | Some bls_key \<Rightarrow> verify_bls_signature bls_key (cert_signature cert) (domain_sep (blob_of_string (STR ''ic-state-root'')) @ root_hash))
-    )
-  )"
-| "check_delegation rk None = Some (blob_of_pk rk)"
-| "check_delegation rk (Some d) = (if verify_cert rk (certificate d) then
-    (case lookup [blob_of_string (STR ''subnet''), blob_of_principal (subnet_id d), blob_of_string (STR ''public_key'')] (certificate d) of Found v \<Rightarrow> Some v)
-  else None)"
+function(sequential) verify_cert_impl :: "'pk \<Rightarrow> 'p option \<Rightarrow> ('p, 'sig) certificate \<Rightarrow> bool" and check_delegation :: "'pk \<Rightarrow> 'p option \<Rightarrow> ('p, 'sig) delegation option \<Rightarrow> blob option" where
+  "verify_cert_impl rk ECID cert = (case check_delegation rk ECID (cert_delegation cert) of
+    Some der_key \<Rightarrow> (case extract_der der_key of
+      Some bls_key \<Rightarrow> verify_bls_signature bls_key (cert_signature cert) (domain_sep (blob_of_text (STR ''ic-state-root'')) @ reconstruct (cert_tree cert))
+    | _ \<Rightarrow> False)
+  | _ \<Rightarrow> False)"
+| "check_delegation rk ECID None = Some (blob_of_pk rk)"
+| "check_delegation rk ECID (Some d) =
+    (case lookup [blob_of_text (STR ''subnet''), blob_of_principal (subnet_id d), blob_of_text (STR ''canister_ranges'')] (certificate d) of Found b \<Rightarrow>
+      (case parse_cbor_canister_ranges b of Some rans \<Rightarrow>
+        if (case ECID of Some p \<Rightarrow> \<exists>(a, b) \<in> set rans. a \<le> p \<and> p \<le> b | _ \<Rightarrow> True) \<and> verify_cert_impl rk ECID (certificate d) then
+          (case lookup [blob_of_text (STR ''subnet''), blob_of_principal (subnet_id d), blob_of_text (STR ''public_key'')] (certificate d) of
+            Found v \<Rightarrow> Some v
+          | _ \<Rightarrow> None)
+        else None
+      | _ \<Rightarrow> None)
+    | _ \<Rightarrow> None)"
   by pat_completeness auto
 termination
-  apply (relation "measure (\<lambda>v. case v of Inl (_, cert) \<Rightarrow> size cert | Inr (_, None) \<Rightarrow> 0 | Inr (_, Some d) \<Rightarrow> size d)")
+  apply (relation "measure (\<lambda>v. case v of Inl (_, _, cert) \<Rightarrow> size cert | Inr (_, _, None) \<Rightarrow> 0 | Inr (_, _, Some d) \<Rightarrow> size d)")
   apply auto[1]
-  subgoal for r c d
-    by (cases c) (auto split: option.splits)
-  subgoal for r d
+  subgoal for rk ECID cert
+    by (cases cert) (auto split: option.splits)
+  subgoal for rk ECID d
     by (cases d) auto
   done
+
+definition cert_special :: "path set \<Rightarrow> 'p \<Rightarrow> 'p request \<Rightarrow> bool" where
+  "cert_special ps ECID req = (
+    let hreq = hash_of_user_request (Inl req) in
+    ECID = ic_principal \<and>
+    request.canister_id req = ic_principal \<and>
+    request.method_name req = STR ''provisional_create_canister_with_cycles'' \<and>
+    (\<forall>p \<in> ps. p = [blob_of_text (STR ''time'')] \<or> (case p of a # b # _ \<Rightarrow> a = blob_of_text (STR ''request_status'') \<and> b = hreq | _ \<Rightarrow> False)))"
+
+definition verify_cert :: "'pk \<Rightarrow> 'p \<Rightarrow> 'p request option \<Rightarrow> ('p, 'sig) certificate \<Rightarrow> bool" where
+  "verify_cert rk ECID r cert = (case r of None \<Rightarrow>
+    verify_cert_impl rk (Some ECID) cert
+  | Some req \<Rightarrow> cert_special (all_paths [] (cert_tree cert)) ECID req \<and>
+      (case lookup [blob_of_text (STR ''request_status''), hash_of_user_request (Inl req), blob_of_text (STR ''reply'')] cert of
+        Found v \<Rightarrow> (case candid_parse_cid v of Some ECID' \<Rightarrow> verify_cert_impl rk (Some ECID') cert | _ \<Rightarrow> False)
+      | _ \<Rightarrow> verify_cert_impl rk None cert)
+  )"
 
 
 
@@ -3066,40 +3092,43 @@ lemma ic_inv:
 definition fold_htree_of :: "(blob \<times> htree) list \<Rightarrow> htree" where
   "fold_htree_of lts = fold (\<lambda>(lab, tree) t. let n = Labeled lab tree in case t of Empty \<Rightarrow> n | _ \<Rightarrow> Fork n t) (rev (sort_key fst lts)) Empty"
 
+lemma lookup_path_fold_htree_of: "distinct (map fst lts) \<Longrightarrow> lookup_path (p # ps) (fold_htree_of lts) = undefined"
+  oops
+
 lemma wf_fold_htree_of: "(\<And>t. t \<in> snd ` set lts \<Longrightarrow> wf_tree t) \<Longrightarrow> distinct (map fst lts) \<Longrightarrow> wf_tree (fold_htree_of lts)"
   oops
 
 fun request_status_tree :: "request_status \<Rightarrow> htree" where
-  "request_status_tree Received = Labeled (blob_of_string (STR ''status'')) (Leaf (blob_of_string (STR ''Received'')))"
-| "request_status_tree Processing = Labeled (blob_of_string (STR ''status'')) (Leaf (blob_of_string (STR ''Processing'')))"
+  "request_status_tree Received = Labeled (blob_of_text (STR ''status'')) (Leaf (blob_of_text (STR ''Received'')))"
+| "request_status_tree Processing = Labeled (blob_of_text (STR ''status'')) (Leaf (blob_of_text (STR ''Processing'')))"
 | "request_status_tree (Rejected code msg) = fold_htree_of
-    [(blob_of_string (STR ''status''), Leaf (blob_of_string (STR ''Rejected''))),
-    (blob_of_string (STR ''reject_code''), Leaf (blob_of_nat code)),
-    (blob_of_string (STR ''reject_message''), Leaf (blob_of_text msg)),
-    (blob_of_string (STR ''error_code''), Leaf (blob_of_nat request_error_code))]"
-| "request_status_tree (Replied b) = fold_htree_of [(blob_of_string (STR ''status''), Leaf (blob_of_string (STR ''Replied''))),
-    (blob_of_string (STR ''reply''), Leaf b)]"
-| "request_status_tree Done = Labeled (blob_of_string (STR ''status'')) (Leaf (blob_of_string (STR ''Done'')))"
+    [(blob_of_text (STR ''status''), Leaf (blob_of_text (STR ''Rejected''))),
+    (blob_of_text (STR ''reject_code''), Leaf (blob_of_nat code)),
+    (blob_of_text (STR ''reject_message''), Leaf (blob_of_text msg)),
+    (blob_of_text (STR ''error_code''), Leaf (blob_of_nat request_error_code))]"
+| "request_status_tree (Replied b) = fold_htree_of [(blob_of_text (STR ''status''), Leaf (blob_of_text (STR ''Replied''))),
+    (blob_of_text (STR ''reply''), Leaf b)]"
+| "request_status_tree Done = Labeled (blob_of_text (STR ''status'')) (Leaf (blob_of_text (STR ''Done'')))"
 
 definition state_tree :: "('p, 'w, 'sm, 'c, 'cid, 'pk, 'sk) ic \<Rightarrow> htree" where
   "state_tree S = fold_htree_of
-    [(blob_of_string (STR ''subnet''), fold_htree_of (map (\<lambda>(sid, pk, sk, rans). (blob_of_principal sid, fold_htree_of (
-      [(blob_of_string (STR ''public_key''), Leaf (blob_of_pk pk)), (blob_of_string (STR ''canister_ranges''), Leaf (cbor_of_canister_ranges rans))]
+    [(blob_of_text (STR ''time''), (Leaf (blob_of_nat (system_time S)))),
+    (blob_of_text (STR ''subnet''), fold_htree_of (map (\<lambda>(sid, pk, sk, rans). (blob_of_principal sid, fold_htree_of (
+      [(blob_of_text (STR ''public_key''), Leaf (blob_of_pk pk)), (blob_of_text (STR ''canister_ranges''), Leaf (cbor_of_canister_ranges rans))]
     ))) (subnets S))),
-    (blob_of_string (STR ''time''), (Leaf (blob_of_nat (system_time S)))),
-    (blob_of_string (STR ''request_status''), fold_htree_of (map (\<lambda>(r, s).
+    (blob_of_text (STR ''request_status''), fold_htree_of (map (\<lambda>(r, s).
       (hash_of_user_request (Inl r), request_status_tree s)
     ) (Rep_list_map (requests S)))),
-    (blob_of_string (STR ''canister''), fold_htree_of (map (\<lambda>(cid, can).
+    (blob_of_text (STR ''canister''), fold_htree_of (map (\<lambda>(cid, can).
       (blob_of_principal cid, fold_htree_of (
-        (case can of None \<Rightarrow> [] | Some c \<Rightarrow> [(blob_of_string (STR ''module_hash''), Leaf (sha_256 (raw_module c)))]) @
-        (case list_map_get (controllers S) cid of None \<Rightarrow> [] | Some ctrls \<Rightarrow>
-          [(blob_of_string (STR ''controllers''), Leaf (cbor_of_principals (principal_list_of_set ctrls)))]
-        ) @
-        (case list_map_get (certified_data S) cid of None \<Rightarrow> [] | Some data \<Rightarrow>
-          [(blob_of_string (STR ''certified_data''), Leaf data)]) @
         (case can of None \<Rightarrow> [] | Some c \<Rightarrow>
-          [(blob_of_string (STR ''metadata''), fold_htree_of (map (\<lambda>(name, b). (blob_of_text name, Leaf b)) (Rep_list_map (public_custom_sections c) @ Rep_list_map (private_custom_sections c))))]
+          [(blob_of_text (STR ''module_hash''), Leaf (sha_256 (raw_module c)))]) @
+        (case list_map_get (controllers S) cid of None \<Rightarrow> [] | Some ctrls \<Rightarrow>
+          [(blob_of_text (STR ''controllers''), Leaf (cbor_of_principals (principal_list_of_set ctrls)))]) @
+        (case list_map_get (certified_data S) cid of None \<Rightarrow> [] | Some data \<Rightarrow>
+          [(blob_of_text (STR ''certified_data''), Leaf data)]) @
+        (case can of None \<Rightarrow> [] | Some c \<Rightarrow>
+          [(blob_of_text (STR ''metadata''), fold_htree_of (map (\<lambda>(name, b). (blob_of_text name, Leaf b)) (Rep_list_map (public_custom_sections c) @ Rep_list_map (private_custom_sections c))))]
         )
     ))) (Rep_list_map (canisters S))))]"
 
@@ -3110,22 +3139,35 @@ fun prune_htree :: "path list \<Rightarrow> path \<Rightarrow> htree \<Rightarro
 | "prune_htree ps p (Leaf v) = (if p \<in> set ps then Leaf v else Pruned (reconstruct (Leaf v)))"
 | "prune_htree ps p (Pruned h) = Pruned h"
 
+lemma all_paths_prune_htree: "all_paths p (prune_htree ps p t) \<subseteq> set ps"
+  by (induction ps p t rule: prune_htree.induct) (auto split: htree.splits)
+
 lemma reconstruct_prune_htree[simp]: "reconstruct (prune_htree ps p t) = reconstruct t"
   by (induction ps p t rule: prune_htree.induct) (auto split: htree.splits)
 
 definition pruned_state_tree :: "path list \<Rightarrow> ('p, 'w, 'sm, 'c, 'cid, 'pk, 'sk) ic \<Rightarrow> htree" where
-  "pruned_state_tree ps S = prune_htree ps [] (state_tree S)"
+  "pruned_state_tree ps S = prune_htree (ps @ [[blob_of_text (STR ''time'')]]) [] (state_tree S)"
 
-definition comp_cert :: "path list \<Rightarrow> 'p \<Rightarrow> ('p, 'w, 'sm, 'c, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'sig) certificate" where
-  "comp_cert ps ECID S = (
+lemma all_paths_pruned_state_tree: "all_paths [] (pruned_state_tree ps S) \<subseteq> set ps \<union> {[blob_of_text (STR ''time'')]}"
+  using all_paths_prune_htree
+  by (force simp: pruned_state_tree_def)
+
+definition comp_cert :: "path list \<Rightarrow> 'p \<Rightarrow> 'p request option \<Rightarrow> ('p, 'w, 'sm, 'c, 'cid, 'pk, 'sk) ic \<Rightarrow> ('p, 'sig) certificate option" where
+  "comp_cert ps ECID r S = (
     let t = pruned_state_tree ps S;
-    h = reconstruct t;
-    st = pruned_state_tree [[blob_of_string (STR ''time'')], [blob_of_string (STR ''subnet'')]] S;
-    sh = reconstruct st in
-    fold (\<lambda>(sid, pk, sk, rans) cert.
-      if (\<exists>(a, b) \<in> set rans. a \<le> ECID \<and> ECID \<le> b) then
-        Certificate t (sign sk h) (Some (Delegation sid (Certificate st (sign (secret_root_key S) sh) None)))
-      else cert) (subnets S) (Certificate t (sign (secret_root_key S) h) None)
+    h = domain_sep (blob_of_text (STR ''ic-state-root'')) @ reconstruct t;
+    ECID' = (case r of Some req \<Rightarrow>
+      (case lookup_path [blob_of_text (STR ''request_status''), hash_of_user_request (Inl req), blob_of_text (STR ''reply'')] t of
+        Found v \<Rightarrow> the (candid_parse_cid v)
+      | _ \<Rightarrow> ECID)
+    | _ \<Rightarrow> ECID);
+    subnet = find (\<lambda>(sid, pk, sk, rans). \<exists>(a, b) \<in> set rans. a \<le> ECID' \<and> ECID' \<le> b) (subnets S);
+    st = pruned_state_tree [[blob_of_text (STR ''time'')], [blob_of_text (STR ''subnet'')]] S;
+    sh = domain_sep (blob_of_text (STR ''ic-state-root'')) @ reconstruct st in
+    if (case r of Some req \<Rightarrow> \<not>cert_special (all_paths [] t) ECID req | _ \<Rightarrow> False) then None else
+    case subnet of Some (sid, pk, sk, rans) \<Rightarrow>
+      Some (Certificate t (sign sk h) (Some (Delegation sid (Certificate st (sign (secret_root_key S) sh) None))))
+    | _ \<Rightarrow> (case r of Some req \<Rightarrow> Some (Certificate t (sign (secret_root_key S) h) None) | _ \<Rightarrow> None)
   )"
 
 lemma fold_cong: "(\<And>x z. x \<in> set xs \<Longrightarrow> f x z = g x z) \<Longrightarrow> fold f xs z = fold g xs z"
@@ -3134,27 +3176,90 @@ lemma fold_cong: "(\<And>x z. x \<in> set xs \<Longrightarrow> f x z = g x z) \<
 lemma fold_propI: "(\<And>x. x \<in> set xs \<Longrightarrow> Q x \<Longrightarrow> P (f x)) \<Longrightarrow> P z \<Longrightarrow> P (fold (\<lambda>x z. if Q x then f x else z) xs z)"
   by (induction xs rule: rev_induct) auto
 
+lemma cert_special_mono: "ps' \<subseteq> (ps \<union> {[blob_of_text (STR ''time'')]}) \<Longrightarrow> cert_special ps ECID req \<Longrightarrow> cert_special ps' ECID req"
+  by (auto simp: cert_special_def)
+
 lemma verify_cert_comp_cert:
-  shows "verify_cert (root_public_key S) (comp_cert ps ECID S)"
+  assumes comp_cert: "comp_cert ps ECID r S = Some cert"
+    and A1: "case extract_der (blob_of_pk (public_root_key S)) of Some bls_key \<Rightarrow> \<forall>h. verify_bls_signature bls_key (sign (secret_root_key S) h) h | _ \<Rightarrow> False"
+    and A2: "\<And>sid sk pk rans. (sid, pk, sk, rans) \<in> set (subnets S) \<Longrightarrow> case extract_der (blob_of_pk pk) of Some bls_key \<Rightarrow> \<forall>h. verify_bls_signature bls_key (sign sk h) h | _ \<Rightarrow> False"
+  shows "verify_cert (public_root_key S) ECID r cert"
 proof -
   define t where "t = pruned_state_tree ps S"
-  define h where "h = reconstruct t"
-  define st where "st = pruned_state_tree [[blob_of_string (STR ''time'')], [blob_of_string (STR ''subnet'')]] S"
-  define sh where "sh = reconstruct st"
-  have cc: "comp_cert ps ECID S = fold
-    (\<lambda>x. If (case x of (sid, pk, sk, rans) \<Rightarrow> \<exists>x\<in>set rans. case x of (a, b) \<Rightarrow> a \<le> ECID \<and> ECID \<le> b)
-      (case x of (sid, pk, sk, rans) \<Rightarrow> Certificate t (sign sk h) (Some (Delegation sid (Certificate st (sign (secret_root_key S) sh) None)))))
-    (subnets S) (Certificate t (sign (secret_root_key S) h) None)"
-    by (auto simp add: Let_def comp_cert_def t_def[symmetric] h_def[symmetric] st_def[symmetric] sh_def[symmetric] intro: fold_cong)
-  have "case check_delegation (root_public_key S) (cert_delegation (comp_cert ps ECID S)) of Some der_key \<Rightarrow> True | _ \<Rightarrow> False"
-    unfolding cc
-    apply (rule fold_propI)
-    oops
+  define h where "h = domain_sep (blob_of_text (STR ''ic-state-root'')) @ reconstruct t"
+  define ECID' where "ECID' = (case r of Some req \<Rightarrow>
+    (case lookup_path [blob_of_text (STR ''request_status''), hash_of_user_request (Inl req), blob_of_text (STR ''reply'')] t of
+      Found v \<Rightarrow> the (candid_parse_cid v)
+    | _ \<Rightarrow> ECID)
+  | _ \<Rightarrow> ECID)"
+  have ECID_eq_ECID'_unless_req: "case r of Some req \<Rightarrow> True | _ \<Rightarrow> ECID = ECID'"
+    by (auto simp: ECID'_def split: option.splits)
+  define st where "st = pruned_state_tree [[blob_of_text (STR ''time'')], [blob_of_text (STR ''subnet'')]] S"
+  define sh where "sh = domain_sep (blob_of_text (STR ''ic-state-root'')) @ reconstruct st"
+  define subnet where "subnet = find (\<lambda>(sid, pk, sk, rans). \<exists>(a, b) \<in> set rans. a \<le> ECID' \<and> ECID' \<le> b) (subnets S)"
+  have cert_tree: "cert_tree cert = t"
+    using comp_cert
+    by (auto simp: comp_cert_def t_def[symmetric] h_def[symmetric] ECID'_def[symmetric] st_def[symmetric] sh_def[symmetric] subnet_def[symmetric] split: option.splits if_splits)
+  have "verify_cert_impl (public_root_key S) x (Certificate t (sign (secret_root_key S) h) None)" for x
+    using A1
+    by (auto simp: h_def split: option.splits)
+  have all_paths: "all_paths [] t \<subseteq> set ps \<union> {[blob_of_text (STR ''time'')]}"
+    using all_paths_pruned_state_tree
+    by (auto simp: t_def)
+  have cert_special_if_req: "cert_special (all_paths [] t) ECID req" if r: "r = Some req" for req
+    using comp_cert
+    by (auto simp: comp_cert_def t_def[symmetric] h_def[symmetric] ECID'_def[symmetric] st_def[symmetric] sh_def[symmetric] subnet_def[symmetric] split: option.splits if_splits)
+       (auto simp: r)
+  show ?thesis
+  proof (cases subnet)
+    case None
+    obtain req where r: "r = Some req"
+      using comp_cert
+      by (auto simp: comp_cert_def t_def[symmetric] h_def[symmetric] ECID'_def[symmetric] st_def[symmetric] sh_def[symmetric] subnet_def[symmetric] None split: option.splits if_splits)
+    have lup: "lookup [blob_of_text (STR ''request_status''), hash_of_user_request (Inl req), blob_of_text (STR ''reply'')] (Certificate t (sign (secret_root_key S) h) None) = Found v \<Longrightarrow>
+      (case candid_parse_cid v of Some cid \<Rightarrow> True | _ \<Rightarrow> False)" for v
+      apply (auto simp: lookup_def cert_tree split: lookup_result.splits option.splits if_splits)
+      sorry
+    show ?thesis
+      using comp_cert A1 cert_special_if_req cert_special_mono[OF all_paths]
+      by (auto simp: comp_cert_def t_def[symmetric] h_def[symmetric] ECID'_def[symmetric] st_def[symmetric] sh_def[symmetric] subnet_def[symmetric] verify_cert_def None
+          split: option.splits if_splits lookup_result.splits)
+         (auto simp: r dest!: lup split: option.splits)
+  next
+    case (Some s)
+    obtain sid pk sk rans where s_def: "s = (sid, pk, sk, rans)"
+      by (cases s) auto
+    have cert: "cert = Certificate t (sign sk h) (Some (Delegation sid (Certificate st (sign (secret_root_key S) sh) None)))"
+      using comp_cert
+      by (auto simp: comp_cert_def t_def[symmetric] h_def[symmetric] ECID'_def[symmetric] st_def[symmetric] sh_def[symmetric] subnet_def[symmetric] Some s_def split: if_splits)
+    have s_in_subnets: "(sid, pk, sk, rans) \<in> set (subnets S)" and ECID'_in_rans: "\<exists>(a, b) \<in> set rans. a \<le> ECID' \<and> ECID' \<le> b"
+      using Some
+      by (auto simp: subnet_def s_def find_Some_iff in_set_conv_nth)
+    obtain b where b_def: "lookup [blob_of_text (STR ''subnet''), blob_of_principal sid, blob_of_text (STR ''canister_ranges'')] (Certificate st (sign (secret_root_key S) sh) (None :: ('p, 'sig) delegation option)) = Found b"
+      sorry
+    have parse_cbor: "parse_cbor_canister_ranges b = Some rans"
+      sorry
+    have lup: "lookup [blob_of_text (STR ''subnet''), blob_of_principal sid, blob_of_text (STR ''public_key'')] (Certificate st (sign (secret_root_key S) sh) (None :: ('p, 'sig) delegation option)) = Found (blob_of_pk pk)"
+      sorry
+    have lup_path: "lookup_path p t = lookup p (Certificate t (sign sk h) (Some (Delegation sid (Certificate st (sign (secret_root_key S) sh) None))))" for p
+      by (auto simp: lookup_def)
+    have cert_special: "case lookup [blob_of_text (STR ''request_status''), hash_of_user_request (Inl req), blob_of_text (STR ''reply'')]
+      (Certificate t (sign sk h) (Some (Delegation sid (Certificate st (sign (secret_root_key S) sh) None)))) of
+       Found v \<Rightarrow> candid_parse_cid v = Some ECID'
+    | _ \<Rightarrow> ECID = ECID'" if cert_special: "cert_special (all_paths [] t) ECID req" and r: "r = Some req" for req
+      using cert_special r
+      apply (auto simp: ECID'_def[unfolded lup_path] split: option.splits lookup_result.splits)
+      sorry
+    show ?thesis
+      using A1 A2[OF s_in_subnets] ECID'_in_rans ECID_eq_ECID'_unless_req cert_special_if_req
+      by (auto simp: cert verify_cert_def b_def parse_cbor lup sh_def[symmetric] h_def[symmetric]
+          split: option.splits lookup_result.splits dest!: cert_special)
+  qed
+qed
 
 definition query_call :: "('p, 'pk, 'sig) envelope \<Rightarrow> 'p \<Rightarrow> ('p, 'w, 'sm, 'c, 'cid, 'pk, 'sk) ic \<Rightarrow> query_response option" where
   "query_call E ECID S = (case content E of Inr (Inl q) \<Rightarrow>
-    let cid = canister_id q;
-    Cert = comp_cert [[blob_of_string (STR ''time'')], [blob_of_string (STR ''canister''), blob_of_principal cid, blob_of_string (STR ''certified_data'')]] ECID S in
+    let cid = canister_id q in
     if cid \<in> verify_envelope E (request.sender q) (system_time S) \<and>
       is_effective_canister_id q ECID \<and>
       system_time S \<le> request.ingress_expiry q then
@@ -3162,7 +3267,8 @@ definition query_call :: "('p, 'pk, 'sig) envelope \<Rightarrow> 'p \<Rightarrow
         (Some (Some can), Some Running, Some bal, Some t) \<Rightarrow>
         if bal \<ge> ic_freezing_limit S cid then
           (case list_map_get (canister_module_query_methods (module can)) (request.method_name q) of Some F \<Rightarrow>
-            let Env = \<lparr>env.time = t, balance = bal, freezing_limit = ic_freezing_limit S cid, certificate = Some (blob_of_certificate Cert), status = status.Running\<rparr> in
+            let Cert = the (comp_cert [[blob_of_text (STR ''time'')], [blob_of_text (STR ''canister''), blob_of_principal cid, blob_of_text (STR ''certified_data'')]] ECID None S);
+            Env = \<lparr>env.time = t, balance = bal, freezing_limit = ic_freezing_limit S cid, certificate = Some (blob_of_certificate Cert), status = status.Running\<rparr> in
             (case F (request.arg q, request.sender q, Env) (wasm_state can) of Inl _ \<Rightarrow> Some (query_response.Rejected CANISTER_ERROR query_reject_msg query_error_code)
             | Inr r \<Rightarrow>
               (case response r of Reply b \<Rightarrow> Some (query_response.Success b)
@@ -3180,20 +3286,20 @@ definition query_call :: "('p, 'pk, 'sig) envelope \<Rightarrow> 'p \<Rightarrow
 
 definition may_read_path :: "'p \<Rightarrow> ('p, 'w, 'sm, 'c, 'cid, 'pk, 'sk) ic \<Rightarrow> 'p \<Rightarrow> path \<Rightarrow> bool" where
   "may_read_path ECID S s p = (case p of a # bs \<Rightarrow>
-    (a = blob_of_string (STR ''time'') \<and> bs = []) \<or>
-    (a = blob_of_string (STR ''subnet'')) \<or>
-    (a = blob_of_string (STR ''request_status'') \<and>
+    (a = blob_of_text (STR ''time'') \<and> bs = []) \<or>
+    (a = blob_of_text (STR ''subnet'')) \<or>
+    (a = blob_of_text (STR ''request_status'') \<and>
       (case bs of b # cs \<Rightarrow>
         \<forall>r \<in> list_map_dom (requests S). hash_of_user_request (Inl r) = b \<longrightarrow> s = request.sender r \<and> is_effective_canister_id r ECID
       | _ \<Rightarrow> False)
     ) \<or>
-    (a = blob_of_string (STR ''canister'') \<and>
+    (a = blob_of_text (STR ''canister'') \<and>
       (case bs of b # c # ds \<Rightarrow>
         b = blob_of_principal ECID \<and>
         (
-          (c = blob_of_string (STR ''module_hash'') \<and> ds = []) \<or>
-          (c = blob_of_string (STR ''controllers'') \<and> ds = []) \<or>
-          (c = blob_of_string (STR ''metadata'') \<and>
+          (c = blob_of_text (STR ''module_hash'') \<and> ds = []) \<or>
+          (c = blob_of_text (STR ''controllers'') \<and> ds = []) \<or>
+          (c = blob_of_text (STR ''metadata'') \<and>
             (case ds of [name] \<Rightarrow>
                 (case list_map_get (canisters S) ECID of Some (Some can) \<Rightarrow>
                   (name \<in> blob_of_text ` list_map_dom (public_custom_sections can)) \<or>
@@ -3214,10 +3320,10 @@ definition read_state :: "('p, 'pk, 'sig) envelope \<Rightarrow> 'p \<Rightarrow
     let TS = verify_envelope E (sender req) (system_time S) in
     if system_time S \<le> ingress_expiry req \<and>
       (\<forall>p \<in> set (paths req). may_read_path ECID S (sender req) p) \<and>
-      (\<forall>p \<in> set (paths req). case p of a # b # _ \<Rightarrow> a = blob_of_string (STR ''request_status'') \<longrightarrow>
+      (\<forall>p \<in> set (paths req). case p of a # b # _ \<Rightarrow> a = blob_of_text (STR ''request_status'') \<longrightarrow>
         (\<exists>r \<in> list_map_dom (requests S). hash_of_user_request (Inl r) = b \<and> request.canister_id r \<in> TS)
       | _ \<Rightarrow> True)
-    then Some (comp_cert (paths req) ECID S)
+    then comp_cert (paths req) ECID (map_option fst (find (\<lambda>(r, _). cert_special (set (paths req)) ECID r) (Rep_list_map (requests S)))) S
     else None
   | _ \<Rightarrow> None)"
 
